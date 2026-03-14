@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "lottie-web": "^5.13.0",
+    "pako": "^2.1.0"
+  }
+}
