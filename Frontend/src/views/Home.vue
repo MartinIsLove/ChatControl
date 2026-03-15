@@ -303,6 +303,14 @@
               this.file = null;
               this.$refs.fileInput.value = '';
             },
+            focusMessageInput() {
+              this.$nextTick(() => {
+                const messageInput = this.$refs.messageInput
+                if (messageInput && !messageInput.disabled) {
+                  messageInput.focus()
+                }
+              })
+            },
             handleFileChange(event) {
               this.file = event.target.files[0];
             },
@@ -567,6 +575,7 @@
                   this.loading = false
                   this.sendingMessage = false
                   this.scrollToBottom()
+                  this.focusMessageInput()
               }
             },
             async handleSubmit(){
@@ -616,6 +625,7 @@
                 } finally {
                     this.loading = false
                     this.sendingMessage = false
+                  this.focusMessageInput()
                 }
               }
               else{
@@ -642,6 +652,7 @@
                     this.sendingMessage = false
                     this.sendingEncryptedFile = false
                     this.scrollToBottom()
+                    this.focusMessageInput()
                   }
                 }
                 else if(outgoingFile && !outgoingText){
@@ -667,6 +678,7 @@
                     this.sendingMessage = false
                     this.sendingEncryptedFile = false
                     this.scrollToBottom()
+                    this.focusMessageInput()
                   }
                 }
               }
@@ -1152,6 +1164,7 @@
             <form @submit.prevent="handleSubmit()">
               <div class="p-3 border-top d-flex align-items-center gap-2">
                 <input
+                  ref="messageInput"
                   v-model="text"
                   type="text"
                   class="form-control"

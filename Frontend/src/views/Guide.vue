@@ -6,27 +6,26 @@
 			</RouterLink>
 			<h1>Guida per ottenere API ID e API Hash</h1>
 			<ol>
-				<li>Per prima cosa bisogna avere un account Telegram attivo.</li>
+				<li>Assicurati di avere un account Telegram attivo.</li>
 				<li>
-					Per seconda cosa bisogna andare a <a href = "https://my.telegram.org/auth">questo link</a>.
+					Vai su <a href="https://my.telegram.org/auth" target="_blank" rel="noopener noreferrer">my.telegram.org/auth</a>.
 					<img src="/telegramApi.png" alt="Pagina di accesso a my.telegram.org" />
 				</li>
 				<li>
-					Poi inserire il proprio numero di telefono e cliccare "Next".
+					Inserisci il tuo numero di telefono e premi "Next".
 					<img src="/telegramApi2.png" alt="Pagina di accesso a my.telegram.org" />
 				</li>
 				<li>
-					Inserire il codice ricevuto su Telegram e cliccare su "Sign in". Poi seguire
-					le indicazioni del sito.
+					Inserisci il codice ricevuto su Telegram, poi premi "Sign in" e segui i passaggi indicati.
 				</li>
 				<li>
-					Una volta ricevuti API ID e API Hash cliccare su Avanti ed inserire telefono, un
-					username ed una password per il sito.
+					Una volta ottenuti API ID e API Hash, torna su ChatControl e compila telefono,
+					username e password del sito.
 				</li>
-				<li>Successivamente arrivera' un messaggio nell'app di Telegram.</li>
+				<li>Dopo l'invio, riceverai un codice nell'app Telegram.</li>
 				<li>
-					Infine se non e' impostata la 2FA sei loggato, altrimenti devi inserire la
-					password di Telegram.
+					Se sul tuo account non e' attiva la 2FA entrerai subito. In caso contrario,
+					dovrai inserire anche la password Telegram.
 				</li>
 			</ol>
 		</section>

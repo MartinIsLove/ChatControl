@@ -1,24 +1,16 @@
-import asyncio
-import base64
-import subprocess
-import tempfile
-import hashlib
-import sqlite3
-import json
-from fastapi import WebSocket
+import asyncio, base64, subprocess, tempfile, hashlib, sqlite3, json, io, os
+from fastapi import WebSocket, HTTPException
 from telethon import events, utils
 from telethon.tl.types import PeerChannel, UpdateDeleteChannelMessages, UpdateDeleteMessages
 from config import pepper
 from database.sqlite import get_connection, db_lock
-from cryptography_ import decifra_vault, decifra_vault, verifica_firma_messaggio, calcola_firma_messaggio, cifra_vault
+from cryptography_ import decrypt_vault, decrypt_vault, verify_message_sign, calculate_message_sign, encrypt_vault
 from databaseInteractions import store_public_key_in_vault
 from utils import  login_cache, is_valid_age_public_key, set_media, is_logged_in, build_candidate_privates
 
-# temp_id -> chat_id -> set[WebSocket]
 _active_connections = {}
 _connections_lock = asyncio.Lock()
 
-# temp_id -> chat_id -> {"ids": set[int], "order": list[int]}
 _message_index = {}
 _message_index_lock = asyncio.Lock()
 _MAX_INDEX_PER_CHAT = 3000
@@ -49,7 +41,7 @@ def _get_remote_signing_keys(user_data, chat_id: int, sender_id: int | None) -> 
                 risultato = cursor.fetchone()
                 if not risultato or not risultato[0]:
                     return {}
-                vault_deciphered = decifra_vault(risultato[0], user_data['data']['masterkey'])
+                vault_deciphered = decrypt_vault(risultato[0], user_data['data']['masterkey'])
                 partecipanti = vault_deciphered.get('partecipanti', {})
                 participant = partecipanti.get(str(sender_id)) if isinstance(partecipanti, dict) else None
                 if participant is None and isinstance(partecipanti, dict):
@@ -63,7 +55,7 @@ def _get_remote_signing_keys(user_data, chat_id: int, sender_id: int | None) -> 
                 risultato = cursor.fetchone()
                 if not risultato or not risultato[0]:
                     return {}
-                vault_deciphered = decifra_vault(risultato[0], user_data['data']['masterkey'])
+                vault_deciphered = decrypt_vault(risultato[0], user_data['data']['masterkey'])
                 signing_keys = vault_deciphered.get('chiavi_firma', {}) if isinstance(vault_deciphered, dict) else {}
     except Exception:
         return {}
@@ -101,7 +93,7 @@ def _verify_signed_payload(
         if not sign_private:
             return False, "chiave di firma locale non disponibile"
         try:
-            expected_sign = calcola_firma_messaggio(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif)
+            expected_sign = calculate_message_sign(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif)
         except ValueError:
             return False, "questo messaggio e' stato modificato"
         return (payload_sign == expected_sign), "questo messaggio e' stato modificato"
@@ -111,7 +103,7 @@ def _verify_signed_payload(
     if not pub_sign:
         return False, "chiave di firma mittente non disponibile"
     try:
-        return verifica_firma_messaggio(pub_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, payload_sign), "questo messaggio e' stato modificato"
+        return verify_message_sign(pub_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, payload_sign), "questo messaggio e' stato modificato"
     except ValueError:
         return False, "questo messaggio e' stato modificato"
 
@@ -138,20 +130,20 @@ def _validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int | N
                     """SELECT vault FROM contatti_gruppo WHERE proprietario = ? AND gruppo_id = ?""",
                     (username, chat_id_cif)
                 )
-                risultato = cursor.fetchone()
-                if not risultato or not risultato[0]:
+                result = cursor.fetchone()
+                if not result or not result[0]:
                     return False, "chiave di cifratura mittente non disponibile"
 
-                vault_deciphered = decifra_vault(risultato[0], user_data['data']['masterkey'])
-                partecipanti = vault_deciphered.get('partecipanti')
-                if not isinstance(partecipanti, dict):
-                    partecipanti = {}
-                    vault_deciphered['partecipanti'] = partecipanti
+                vault_deciphered = decrypt_vault(result[0], user_data['data']['masterkey'])
+                partecipants = vault_deciphered.get('partecipanti')
+                if not isinstance(partecipants, dict):
+                    partecipants = {}
+                    vault_deciphered['partecipanti'] = partecipants
 
                 sender_key = str(sender_id)
-                participant_data = partecipanti.get(sender_key)
+                participant_data = partecipants.get(sender_key)
                 if participant_data is None:
-                    participant_data = partecipanti.get(sender_id)
+                    participant_data = partecipants.get(sender_id)
                 if not isinstance(participant_data, dict):
                     participant_data = {}
 
@@ -160,9 +152,9 @@ def _validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int | N
                     return False, "questo messaggio e' un reply attack"
 
                 participant_data['seq'] = seq
-                partecipanti[sender_key] = participant_data
+                partecipants[sender_key] = participant_data
 
-                updated_vault = cifra_vault(vault_deciphered, user_data['data']['masterkey'])
+                updated_vault = encrypt_vault(vault_deciphered, user_data['data']['masterkey'])
                 cursor.execute(
                     """UPDATE contatti_gruppo SET vault = ? WHERE proprietario = ? AND gruppo_id = ?""",
                     (updated_vault, username, chat_id_cif)
@@ -172,17 +164,17 @@ def _validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int | N
                     """SELECT vault FROM contatti WHERE proprietario = ? AND contatto_id = ?""",
                     (username, chat_id_cif)
                 )
-                risultato = cursor.fetchone()
-                if not risultato or not risultato[0]:
+                result = cursor.fetchone()
+                if not result or not result[0]:
                     return False, "chiave di cifratura mittente non disponibile"
 
-                vault_deciphered = decifra_vault(risultato[0], user_data['data']['masterkey'])
+                vault_deciphered = decrypt_vault(result[0], user_data['data']['masterkey'])
                 current_seq = vault_deciphered.get('seq') if isinstance(vault_deciphered.get('seq'), int) else None
                 if current_seq is not None and seq <= current_seq:
                     return False, "questo messaggio e' un reply attack"
 
                 vault_deciphered['seq'] = seq
-                updated_vault = cifra_vault(vault_deciphered, user_data['data']['masterkey'])
+                updated_vault = encrypt_vault(vault_deciphered, user_data['data']['masterkey'])
                 cursor.execute(
                     """UPDATE contatti SET vault = ? WHERE proprietario = ? AND contatto_id = ?""",
                     (updated_vault, username, chat_id_cif)
@@ -216,18 +208,18 @@ async def _remove_user_from_vault(temp_id: str, chat_id: int, user_id: int | Non
                     """SELECT vault FROM contatti_gruppo WHERE proprietario = ? AND gruppo_id = ?""",
                     (username, chat_id_cif)
                 )
-                risultato = cursor.fetchone()
-                if not risultato or not risultato[0]:
+                result = cursor.fetchone()
+                if not result or not result[0]:
                     return
-                vault_deciphered = decifra_vault(risultato[0], user_data['data']['masterkey'])
-                partecipanti = vault_deciphered.get('partecipanti')
-                if not partecipanti or str(user_id) not in partecipanti:
+                vault_deciphered = decrypt_vault(result[0], user_data['data']['masterkey'])
+                partecipants = vault_deciphered.get('partecipanti')
+                if not partecipants or str(user_id) not in partecipants:
                     return
-                del partecipanti[str(user_id)]
-                vault_cifrato = cifra_vault(vault_deciphered, user_data['data']['masterkey'])
+                del partecipants[str(user_id)]
+                ciphered_vault = encrypt_vault(vault_deciphered, user_data['data']['masterkey'])
                 cursor.execute(
                     """UPDATE contatti_gruppo SET vault = ? WHERE proprietario = ? AND gruppo_id = ?""",
-                    (vault_cifrato, username, chat_id_cif)
+                    (ciphered_vault, username, chat_id_cif)
                 )
                 conn.commit()
             else:
@@ -237,19 +229,19 @@ async def _remove_user_from_vault(temp_id: str, chat_id: int, user_id: int | Non
                 )
                 conn.commit()
     except sqlite3.Error as error:
-        print(f"ERROR remove_user_from_vault: {error}")
+        return
 
 #crea una struttura con al suo interno l'id utente, connesso ad ogni chat con un set ed una lista di id dei messaggi con eventi (la lista e' ordinata)
 #serve solo per alcuni raw update eliminazioni in chat singole per esempio
-async def index_messages(temp_id: str, chat_id: int, message_ids: list[int]):
-    if not message_ids:
+async def index_messages(temp_id: str, chat_id: int, mess_ids: list[int]):
+    if not mess_ids:
         return
     async with _message_index_lock:
         user_map = _message_index.setdefault(temp_id, {})
         chat_map = user_map.setdefault(chat_id, {"ids": set(), "order": []})
         ids_set = chat_map["ids"]
         order = chat_map["order"]
-        for mid in message_ids:
+        for mid in mess_ids:
             if mid is None:
                 continue
             if mid in ids_set:
@@ -281,14 +273,14 @@ async def drop_message_ids(temp_id: str, chat_id: int, message_ids: list[int]):
             chat_map["order"] = [mid for mid in order if mid in ids_set]
 
 
-async def resolve_chat_id_for_deleted(temp_id: str, message_ids: list[int]) -> int | None:
-    if not message_ids:
+async def resolve_chat_id_for_deleted(temp_id: str, mess_ids: list[int]) -> int | None:
+    if not mess_ids:
         return None
     async with _message_index_lock:
         user_map = _message_index.get(temp_id)
         if not user_map:
             return None
-        ids = set(mid for mid in message_ids if mid is not None)
+        ids = set(mid for mid in mess_ids if mid is not None)
         if not ids:
             return None
         candidates = []
@@ -301,7 +293,7 @@ async def resolve_chat_id_for_deleted(temp_id: str, message_ids: list[int]) -> i
 
 
 def _serialize_message(msg):
-    message_data = {
+    mess_data = {
         "id": msg.id,
         "chat_id": msg.chat_id,
         "text": msg.message or "",
@@ -311,9 +303,9 @@ def _serialize_message(msg):
         "reply_to": msg.reply_to.reply_to_msg_id if msg.reply_to else None,
     }
     if msg.media:
-        set_media(msg, message_data)
+        set_media(msg, mess_data)
 
-    return message_data
+    return mess_data
 
 
 async def connect_socket(temp_id: str, chat_id: int, websocket: WebSocket):
@@ -374,10 +366,9 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
         temp_id, data = is_logged_in(login_session, False)
         me = await client.get_me()
         my_id = me.id if me else None
-        message_data = _serialize_message(event.message)
-        print(message_data)
+        mess_data = _serialize_message(event.message)
         sender = await event.message.get_sender()
-        message_data['sender_username'] = getattr(sender, 'username', None) if sender else None
+        mess_data['sender_username'] = getattr(sender, 'username', None) if sender else None
         chat_id_cif = hashlib.sha256(pepper.encode() + str(event.chat_id).encode()).hexdigest()
 
         if not event.chat_id:
@@ -393,26 +384,26 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
             try:
                 parsed = json.loads(text)
                 if isinstance(parsed, dict):
-                    message_data['json'] = parsed
-                    message_data['is_json'] = True
+                    mess_data['json'] = parsed
+                    mess_data['is_json'] = True
                 else:
-                    message_data['is_json'] = False
+                    mess_data['is_json'] = False
             except Exception:
-                message_data['is_json'] = False
+                mess_data['is_json'] = False
                 parsed = None
 
-            if message_data['is_json'] == True:
+            if mess_data['is_json'] == True:
                 cif_flag = parsed.get("CIF") or parsed.get("cif")
                 if cif_flag == "in":
-                    if my_id and message_data.get('sender_id') == my_id:
-                        message_data['is_json'] = False
-                        message_data['text'] = None
-                        message_data['chiave'] = "Questo messaggio e' uno scambio di chiave"
-                        message_data['is_system'] = True
+                    if my_id and mess_data.get('sender_id') == my_id:
+                        mess_data['is_json'] = False
+                        mess_data['text'] = None
+                        mess_data['chiave'] = "Questo messaggio e' uno scambio di chiave"
+                        mess_data['is_system'] = True
                         payload = {
                             "event_type": "new",
                             "chat_id": event.chat_id,
-                            "message": message_data,
+                            "message": mess_data,
                         }
                         await broadcast_event(temp_id, event.chat_id, payload)
                         return
@@ -432,29 +423,28 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                 kid=kid,
                                 kid_cif=kid_cif,
                                 pub_sign=pub_sign,
-                                msg_date=message_data.get('date'),
+                                msg_date=mess_data.get('date'),
                                 is_group=_is_group_chat_id(event.chat_id),
                                 group_title=getattr(event.chat, "title", "Gruppo")
                             )
-                    message_data['text'] = None
-                    message_data['chiave'] = "Questo messaggio e' uno scambio di chiave"
-                    message_data['is_system'] = True
+                    mess_data['text'] = None
+                    mess_data['chiave'] = "Questo messaggio e' uno scambio di chiave"
+                    mess_data['is_system'] = True
                 
                 if cif_flag == "on":
-                    text = message_data['json'].get('text')
-                    timestamp = message_data.get('date')
-                    id_message = message_data['json'].get('id')
-                    seq = message_data['json'].get('seq')
-                    kid = message_data['json'].get('kid')
-                    kid_cif = message_data['json'].get('kid_cif')
-                    sign = message_data['json'].get('sign')
+                    text = mess_data['json'].get('text')
+                    id_message = mess_data['json'].get('id')
+                    seq = mess_data['json'].get('seq')
+                    kid = mess_data['json'].get('kid')
+                    kid_cif = mess_data['json'].get('kid_cif')
+                    sign = mess_data['json'].get('sign')
 
-                    firma_valida, firma_error = _verify_signed_payload(
+                    valid_sign, sign_error = _verify_signed_payload(
                         data,
                         event.chat_id,
                         chat_id_cif,
                         my_id,
-                        message_data.get('sender_id'),
+                        mess_data.get('sender_id'),
                         id_message,
                         kid,
                         kid_cif,
@@ -463,15 +453,15 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                         sign,
                     )
 
-                    if not firma_valida:
-                        message_data['error'] = firma_error
-                        if 'json' in message_data:
-                            del message_data['json']
-                        message_data['is_json'] = False
+                    if not valid_sign:
+                        mess_data['error'] = sign_error
+                        if 'json' in mess_data:
+                            del mess_data['json']
+                        mess_data['is_json'] = False
                         payload = {
                             "event_type": "new",
                             "chat_id": event.chat_id,
-                            "message": message_data,
+                            "message": mess_data,
                         }
                         await broadcast_event(temp_id, event.chat_id, payload)
                         return
@@ -480,7 +470,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                     chat_keys = chats_data.get(chat_id_cif, {})
                     candidate_privates = build_candidate_privates(chat_keys, kid_cif=kid_cif)
 
-                    text_decifrato = None
+                    decr_text = None
                     
 
                     for privata in candidate_privates:
@@ -501,88 +491,85 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                     capture_output=True,
                                     check=True
                                 )
-                                text_decifrato = result.stdout.decode()
+                                decr_text = result.stdout.decode()
                                 break
                             finally:
-                                import os
                                 os.unlink(keyfile_path)
-                        except Exception as e:
+                        except Exception:
                             
                             continue                    
-                    if text_decifrato:
+                    if decr_text:
                         try:
-                            dizionario = json.loads(text_decifrato)
+                            mess_dic = json.loads(decr_text)
                             
-                            if dizionario['cif'] == "on":
-                                id_message_decifrato = dizionario.get('id')
-                                sign_inside = dizionario.get('sign')
-                                kid_inside = dizionario.get('kid')
-                                kid_cif_inside = dizionario.get('kid_cif')
-                                if id_message != id_message_decifrato or sign_inside != sign or kid_inside != kid or (kid_cif and kid_cif_inside != kid_cif):
-                                    message_data['error'] = "questo messaggio e' stato modificato"
-                                    if 'json' in message_data:
-                                        del message_data['json']
-                                    message_data['is_json'] = False
+                            if mess_dic['cif'] == "on":
+                                mess_id_decr = mess_dic.get('id')
+                                sign_inside = mess_dic.get('sign')
+                                kid_inside = mess_dic.get('kid')
+                                kid_cif_inside = mess_dic.get('kid_cif')
+                                if id_message != mess_id_decr or sign_inside != sign or kid_inside != kid or (kid_cif and kid_cif_inside != kid_cif):
+                                    mess_data['error'] = "questo messaggio e' stato modificato"
+                                    if 'json' in mess_data:
+                                        del mess_data['json']
+                                    mess_data['is_json'] = False
                                     payload = {
                                         "event_type": "new",
                                         "chat_id": event.chat_id,
-                                        "message": message_data,
+                                        "message": mess_data,
                                     }
                                     await broadcast_event(temp_id, event.chat_id, payload)
                                     return
 
-                                # Persist seq only after full payload validation
-                                # (signature + inner/outer metadata consistency).
                                 seq_ok, seq_error = _validate_and_store_realtime_seq(
                                     data,
                                     event.chat_id,
-                                    message_data.get('sender_id'),
+                                    mess_data.get('sender_id'),
                                     seq,
                                 )
                                 if not seq_ok:
-                                    message_data['error'] = seq_error
-                                    if 'json' in message_data:
-                                        del message_data['json']
-                                    message_data['is_json'] = False
+                                    mess_data['error'] = seq_error
+                                    if 'json' in mess_data:
+                                        del mess_data['json']
+                                    mess_data['is_json'] = False
                                     payload = {
                                         "event_type": "new",
                                         "chat_id": event.chat_id,
-                                        "message": message_data,
+                                        "message": mess_data,
                                     }
                                     await broadcast_event(temp_id, event.chat_id, payload)
                                     return
                             
                                 
-                                message_data['text'] = dizionario['text']
-                                message_data['secure'] = True
+                                mess_data['text'] = mess_dic['text']
+                                mess_data['secure'] = True
 
                                 
-                                if 'json' in message_data:
-                                    del message_data['json']
-                                message_data['is_json'] = False
+                                if 'json' in mess_data:
+                                    del mess_data['json']
+                                mess_data['is_json'] = False
                             else:
-                                message_data['error'] = "questo messaggio e' stato modificato"
-                                if 'json' in message_data:
-                                    del message_data['json']
-                                message_data['is_json'] = False
-                        except Exception as e:
-                            import traceback
-                            traceback.print_exc()
+                                mess_data['error'] = "questo messaggio e' stato modificato"
+                                if 'json' in mess_data:
+                                    del mess_data['json']
+                                mess_data['is_json'] = False
+                        except Exception:
+                            raise HTTPException(status_code=500)
+
 
                 if cif_flag == "message":
                     try:
-                        id_message = message_data['json'].get('id')
-                        seq = message_data['json'].get('seq')
-                        kid = message_data['json'].get('kid')
-                        kid_cif = message_data['json'].get('kid_cif')
-                        sign = message_data['json'].get('sign')
+                        id_message = mess_data['json'].get('id')
+                        seq = mess_data['json'].get('seq')
+                        kid = mess_data['json'].get('kid')
+                        kid_cif = mess_data['json'].get('kid_cif')
+                        sign = mess_data['json'].get('sign')
 
-                        firma_valida, firma_error = _verify_signed_payload(
+                        valid_sign, sign_error = _verify_signed_payload(
                             data,
                             event.chat_id,
                             chat_id_cif,
                             my_id,
-                            message_data.get('sender_id'),
+                            mess_data.get('sender_id'),
                             id_message,
                             kid,
                             kid_cif,
@@ -590,48 +577,46 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                             cif_flag,
                             sign,
                         )
-                        if not firma_valida:
-                            message_data['error'] = firma_error
-                            if 'json' in message_data:
-                                del message_data['json']
-                            message_data['is_json'] = False
+                        if not valid_sign:
+                            mess_data['error'] = sign_error
+                            if 'json' in mess_data:
+                                del mess_data['json']
+                            mess_data['is_json'] = False
                             payload = {
                                 "event_type": "new",
                                 "chat_id": event.chat_id,
-                                "message": message_data,
+                                "message": mess_data,
                             }
                             await broadcast_event(temp_id, event.chat_id, payload)
                             return
 
-                        message_id = message_data.get('id')
-                        if not message_id:
-                            message_data['error'] = "nessun message id presente"
+                        mess_id = mess_data.get('id')
+                        if not mess_id:
+                            mess_data['error'] = "nessun message id presente"
                             payload = {
                                         "event_type": "new",
                                         "chat_id": event.chat_id,
-                                        "message": message_data,
+                                        "message": mess_data,
                                     }
                             await broadcast_event(temp_id, event.chat_id, payload)
                             return
 
-                        full_message = await client.get_messages(entity, ids=message_id)
-                        if not full_message or not full_message.media or not full_message.document:
-                            message_data['error'] = "il messaggio dovrebbe contenere un documento, ma non e' presente"
+                        full_mess = await client.get_messages(entity, ids=mess_id)
+                        if not full_mess or not full_mess.media or not full_mess.document:
+                            mess_data['error'] = "il messaggio dovrebbe contenere un documento, ma non e' presente"
                             payload = {
                                         "event_type": "new",
                                         "chat_id": event.chat_id,
-                                        "message": message_data,
+                                        "message": mess_data,
                                     }
                             await broadcast_event(temp_id, event.chat_id, payload)
                             return
 
-                        import io
                         file_bytes = io.BytesIO()
-                        await client.download_media(full_message, file=file_bytes)
+                        await client.download_media(full_mess, file=file_bytes)
                         file_bytes.seek(0)
                         encrypted_payload = file_bytes.getvalue()
 
-                        timestamp = message_data.get('date')
                         chats_data = data['data'].get('chats', {})
                         chat_keys = chats_data.get(chat_id_cif, {})
                         candidate_privates = build_candidate_privates(chat_keys, kid_cif=kid_cif)
@@ -656,7 +641,6 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                     decrypted_payload = result.stdout
                                     break
                                 finally:
-                                    import os
                                     os.unlink(keyfile_path)
                             except Exception:
                                 continue
@@ -675,12 +659,12 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
 
                                 if inner_metadata and inner_metadata.get('cif') == 'message':
 
-                                    firma_valida, firma_error = _verify_signed_payload(
+                                    valid_sign, sign_error = _verify_signed_payload(
                                         data,
                                         event.chat_id,
                                         chat_id_cif,
                                         my_id,
-                                        message_data.get('sender_id'),
+                                        mess_data.get('sender_id'),
                                         inner_metadata.get('id'),
                                         inner_metadata.get('kid'),
                                         inner_metadata.get('kid_cif'),
@@ -688,33 +672,33 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                         inner_metadata.get('cif'),
                                         inner_metadata.get('sign'),
                                     )
-                                    if not firma_valida:
-                                        message_data['error'] = firma_error
-                                        if 'json' in message_data:
-                                            del message_data['json']
-                                        message_data['is_json'] = False
+                                    if not valid_sign:
+                                        mess_data['error'] = sign_error
+                                        if 'json' in mess_data:
+                                            del mess_data['json']
+                                        mess_data['is_json'] = False
                                         payload = {
                                             "event_type": "new",
                                             "chat_id": event.chat_id,
-                                            "message": message_data,
+                                            "message": mess_data,
                                         }
                                         await broadcast_event(temp_id, event.chat_id, payload)
                                         return
 
-                                    id_message_decifrato = inner_metadata.get('id')
+                                    mess_id_decr = inner_metadata.get('id')
                                     sign_inside = inner_metadata.get('sign')
                                     kid_inside = inner_metadata.get('kid')
                                     kid_cif_inside = inner_metadata.get('kid_cif')
 
-                                    if id_message != id_message_decifrato or sign_inside != sign or kid_inside != kid or (kid_cif and kid_cif_inside != kid_cif):
-                                        message_data['error'] = "questo messaggio e' stato modificato"
-                                        if 'json' in message_data:
-                                            del message_data['json']
-                                        message_data['is_json'] = False
+                                    if id_message != mess_id_decr or sign_inside != sign or kid_inside != kid or (kid_cif and kid_cif_inside != kid_cif):
+                                        mess_data['error'] = "questo messaggio e' stato modificato"
+                                        if 'json' in mess_data:
+                                            del mess_data['json']
+                                        mess_data['is_json'] = False
                                         payload = {
                                             "event_type": "new",
                                             "chat_id": event.chat_id,
-                                            "message": message_data,
+                                            "message": mess_data,
                                         }
                                         await broadcast_event(temp_id, event.chat_id, payload)
                                         return
@@ -722,50 +706,50 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                     seq_ok, seq_error = _validate_and_store_realtime_seq(
                                         data,
                                         event.chat_id,
-                                        message_data.get('sender_id'),
+                                        mess_data.get('sender_id'),
                                         seq,
                                     )
                                     if not seq_ok:
-                                        message_data['error'] = seq_error
-                                        if 'json' in message_data:
-                                            del message_data['json']
-                                        message_data['is_json'] = False
+                                        mess_data['error'] = seq_error
+                                        if 'json' in mess_data:
+                                            del mess_data['json']
+                                        mess_data['is_json'] = False
                                         payload = {
                                             "event_type": "new",
                                             "chat_id": event.chat_id,
-                                            "message": message_data,
+                                            "message": mess_data,
                                         }
                                         await broadcast_event(temp_id, event.chat_id, payload)
                                         return
 
-                                    message_data['text'] = message_bytes.decode('utf-8', errors='replace')
+                                    mess_data['text'] = message_bytes.decode('utf-8', errors='replace')
 
-                                    if 'json' in message_data:
-                                        del message_data['json']
-                                    message_data['is_json'] = False
-                                    message_data['secure'] = True
-                                    message_data['file'] = False
-                                    message_data.pop('media_type', None)
-                                    message_data.pop('filename', None)
-                                    message_data.pop('mime', None)
-                                    message_data.pop('size', None)
+                                    if 'json' in mess_data:
+                                        del mess_data['json']
+                                    mess_data['is_json'] = False
+                                    mess_data['secure'] = True
+                                    mess_data['file'] = False
+                                    mess_data.pop('media_type', None)
+                                    mess_data.pop('filename', None)
+                                    mess_data.pop('mime', None)
+                                    mess_data.pop('size', None)
                     except Exception:
-                        import traceback
-                        traceback.print_exc()
+                        raise HTTPException(status_code=500)
+
         
                 if cif_flag == "file":
-                    id_message = message_data['json'].get('id')
-                    seq = message_data['json'].get('seq')
-                    kid = message_data['json'].get('kid')
-                    kid_cif = message_data['json'].get('kid_cif')
-                    sign = message_data['json'].get('sign')
+                    id_message = mess_data['json'].get('id')
+                    seq = mess_data['json'].get('seq')
+                    kid = mess_data['json'].get('kid')
+                    kid_cif = mess_data['json'].get('kid_cif')
+                    sign = mess_data['json'].get('sign')
 
-                    firma_valida, firma_error = _verify_signed_payload(
+                    valid_sign, sign_error = _verify_signed_payload(
                         data,
                         event.chat_id,
                         chat_id_cif,
                         my_id,
-                        message_data.get('sender_id'),
+                        mess_data.get('sender_id'),
                         id_message,
                         kid,
                         kid_cif,
@@ -773,28 +757,27 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                         cif_flag,
                         sign,
                     )
-                    if not firma_valida:
-                        message_data['error'] = firma_error
-                        if 'json' in message_data:
-                            del message_data['json']
-                        message_data['is_json'] = False
+                    if not valid_sign:
+                        mess_data['error'] = sign_error
+                        if 'json' in mess_data:
+                            del mess_data['json']
+                        mess_data['is_json'] = False
                         payload = {
                             "event_type": "new",
                             "chat_id": event.chat_id,
-                            "message": message_data,
+                            "message": mess_data,
                         }
                         await broadcast_event(temp_id, event.chat_id, payload)
                         return
 
-                    message_id = message_data.get('id')
-                    if message_id:
-                        full_message = await client.get_messages(entity, ids=message_id)
-                        if full_message and full_message.media:
-                            import io
+                    mess_id = mess_data.get('id')
+                    if mess_id:
+                        full_mess = await client.get_messages(entity, ids=mess_id)
+                        if full_mess and full_mess.media:
                             file_bytes = io.BytesIO()
                             max_bytes = 64 * 1024
                             downloaded = 0
-                            async for chunk in client.iter_download(full_message, offset=0, limit=max_bytes):
+                            async for chunk in client.iter_download(full_mess, offset=0, limit=max_bytes):
                                 if not chunk:
                                     break
                                 file_bytes.write(chunk)
@@ -803,10 +786,9 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                     break
                             file_bytes.seek(0)
                             file_head_bytes = file_bytes.getvalue()
-                            message_data['file_head'] = base64.b64encode(file_head_bytes).decode()
-                            message_data['file_head_size'] = len(file_head_bytes)
+                            mess_data['file_head'] = base64.b64encode(file_head_bytes).decode()
+                            mess_data['file_head_size'] = len(file_head_bytes)
 
-                            header_metadata_size = None
                             header_encrypted_metadata = None
                             if len(file_head_bytes) >= 8:
                                 header_metadata_size = int.from_bytes(file_head_bytes[:4], byteorder='big')
@@ -814,12 +796,11 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                 if 0 < header_encrypted_size <= len(file_head_bytes) - 8:
                                     header_encrypted_metadata = file_head_bytes[8:8 + header_encrypted_size]
         
-                    timestamp = message_data.get('date')
                     chats_data = data['data'].get('chats', {})
                     chat_keys = chats_data.get(chat_id_cif, {})
                     candidate_privates = build_candidate_privates(chat_keys, kid_cif=kid_cif)
 
-                    text_decifrato = None
+                    decr_text = None
                     if header_encrypted_metadata:
                         for privata in candidate_privates:
                             try:
@@ -837,58 +818,57 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                         capture_output=True,
                                         check=True
                                     )
-                                    text_decifrato = result.stdout.decode()
+                                    decr_text = result.stdout.decode()
                                     break
                                 finally:
-                                    import os
                                     os.unlink(keyfile_path)
                             except Exception:
                                 continue
 
-                    if text_decifrato:
+                    if decr_text:
                         try:
-                            dizionario = json.loads(text_decifrato)
-                            if dizionario['cif'] == "file":
-                                firma_valida, firma_error = _verify_signed_payload(
+                            mess_dic = json.loads(decr_text)
+                            if mess_dic['cif'] == "file":
+                                valid_sign, sign_error = _verify_signed_payload(
                                     data,
                                     event.chat_id,
                                     chat_id_cif,
                                     my_id,
-                                    message_data.get('sender_id'),
-                                    dizionario.get('id'),
-                                    dizionario.get('kid'),
-                                    dizionario.get('kid_cif'),
-                                    dizionario.get('seq'),
-                                    dizionario.get('cif'),
-                                    dizionario.get('sign'),
+                                    mess_data.get('sender_id'),
+                                    mess_dic.get('id'),
+                                    mess_dic.get('kid'),
+                                    mess_dic.get('kid_cif'),
+                                    mess_dic.get('seq'),
+                                    mess_dic.get('cif'),
+                                    mess_dic.get('sign'),
                                 )
-                                if not firma_valida:
-                                    message_data['error'] = firma_error
-                                    if 'json' in message_data:
-                                        del message_data['json']
-                                    message_data['is_json'] = False
+                                if not valid_sign:
+                                    mess_data['error'] = sign_error
+                                    if 'json' in mess_data:
+                                        del mess_data['json']
+                                    mess_data['is_json'] = False
                                     payload = {
                                         "event_type": "new",
                                         "chat_id": event.chat_id,
-                                        "message": message_data,
+                                        "message": mess_data,
                                     }
                                     await broadcast_event(temp_id, event.chat_id, payload)
                                     return
 
-                                id_message_decifrato = dizionario.get('id')
-                                sign_inside = dizionario.get('sign')
-                                kid_inside = dizionario.get('kid')
-                                kid_cif_inside = dizionario.get('kid_cif')
+                                mess_id_decr = mess_dic.get('id')
+                                sign_inside = mess_dic.get('sign')
+                                kid_inside = mess_dic.get('kid')
+                                kid_cif_inside = mess_dic.get('kid_cif')
 
-                                if id_message != id_message_decifrato or sign_inside != sign or kid_inside != kid or (kid_cif and kid_cif_inside != kid_cif):
-                                        message_data['error'] = "questo messaggio e' stato modificato"
-                                        if 'json' in message_data:
-                                            del message_data['json']
-                                        message_data['is_json'] = False
+                                if id_message != mess_id_decr or sign_inside != sign or kid_inside != kid or (kid_cif and kid_cif_inside != kid_cif):
+                                        mess_data['error'] = "questo messaggio e' stato modificato"
+                                        if 'json' in mess_data:
+                                            del mess_data['json']
+                                        mess_data['is_json'] = False
                                         payload = {
                                             "event_type": "new",
                                             "chat_id": event.chat_id,
-                                            "message": message_data,
+                                            "message": mess_data,
                                         }
                                         await broadcast_event(temp_id, event.chat_id, payload)
                                         return
@@ -896,45 +876,45 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                 seq_ok, seq_error = _validate_and_store_realtime_seq(
                                     data,
                                     event.chat_id,
-                                    message_data.get('sender_id'),
+                                    mess_data.get('sender_id'),
                                     seq,
                                 )
                                 if not seq_ok:
-                                    message_data['error'] = seq_error
-                                    if 'json' in message_data:
-                                        del message_data['json']
-                                    message_data['is_json'] = False
+                                    mess_data['error'] = seq_error
+                                    if 'json' in mess_data:
+                                        del mess_data['json']
+                                    mess_data['is_json'] = False
                                     payload = {
                                         "event_type": "new",
                                         "chat_id": event.chat_id,
-                                        "message": message_data,
+                                        "message": mess_data,
                                     }
                                     await broadcast_event(temp_id, event.chat_id, payload)
                                     return
                                 
-                                message_data['file'] = True
-                                message_data['filename'] = dizionario['filename']
-                                message_data['text'] = dizionario['text']
-                                message_data['mime'] = dizionario['mime']
-                                message_data['size'] = dizionario['size']
-                                message_data['secure'] = True
+                                mess_data['file'] = True
+                                mess_data['filename'] = mess_dic['filename']
+                                mess_data['text'] = mess_dic['text']
+                                mess_data['mime'] = mess_dic['mime']
+                                mess_data['size'] = mess_dic['size']
+                                mess_data['secure'] = True
 
 
-                                if 'json' in message_data:
-                                    del message_data['json']
-                                message_data['is_json'] = False
+                                if 'json' in mess_data:
+                                    del mess_data['json']
+                                mess_data['is_json'] = False
                             else:
-                                message_data['error'] = "questo messaggio e' stato modificato"
-                                if 'json' in message_data:
-                                    del message_data['json']
-                                message_data['is_json'] = False
-                        except Exception as e:
-                            import traceback
-                            traceback.print_exc()
+                                mess_data['error'] = "questo messaggio e' stato modificato"
+                                if 'json' in mess_data:
+                                    del mess_data['json']
+                                mess_data['is_json'] = False
+                        except Exception:
+                            raise HTTPException(status_code=500)
+
         payload = {
             "event_type": "new",
             "chat_id": event.chat_id,
-            "message": message_data,
+            "message": mess_data,
         }
         await broadcast_event(temp_id, event.chat_id, payload)
         return
@@ -953,7 +933,6 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
         await broadcast_event(temp_id, event.chat_id, payload)
 
     async def handle_deleted_message(event):
-        print("deleted handled")
         message_ids = list(event.deleted_ids or [])
         if not message_ids:
             return
@@ -976,33 +955,32 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
             "chat_id": chat_id,
             "message_ids": message_ids,
         }
-        print(payload)
         await broadcast_event(temp_id, chat_id, payload)
 
     async def handle_raw_update(event):
         update = getattr(event, "update", event)
         if isinstance(update, UpdateDeleteChannelMessages):
             chat_id = utils.get_peer_id(PeerChannel(update.channel_id))
-            message_ids = list(update.messages or [])
-            await drop_message_ids(temp_id, chat_id, message_ids)
+            mess_ids = list(update.messages or [])
+            await drop_message_ids(temp_id, chat_id, mess_ids)
             payload = {
                 "event_type": "deleted",
                 "chat_id": chat_id,
-                "message_ids": message_ids,
+                "message_ids": mess_ids,
             }
             await broadcast_event(temp_id, chat_id, payload)
         elif isinstance(update, UpdateDeleteMessages):
-            message_ids = list(update.messages or [])
-            if not message_ids:
+            mess_ids = list(update.messages or [])
+            if not mess_ids:
                 return
-            chat_id = await resolve_chat_id_for_deleted(temp_id, message_ids)
+            chat_id = await resolve_chat_id_for_deleted(temp_id, mess_ids)
             if not chat_id:
                 return
-            await drop_message_ids(temp_id, chat_id, message_ids)
+            await drop_message_ids(temp_id, chat_id, mess_ids)
             payload = {
                 "event_type": "deleted",
                 "chat_id": chat_id,
-                "message_ids": message_ids,
+                "message_ids": mess_ids,
             }
             await broadcast_event(temp_id, chat_id, payload)
 

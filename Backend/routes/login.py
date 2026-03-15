@@ -1,10 +1,8 @@
 from fastapi import APIRouter, Response, Cookie, HTTPException
 from pydantic import BaseModel
-import secrets
+import secrets, time, hashlib
 from config import pepper
-import time
-import hashlib
-from cryptography_ import cifra_vault
+from cryptography_ import encrypt_vault
 from utils import cipher, login_cache, is_logged_in
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -60,12 +58,7 @@ async def login_user(credentials: login_user, response: Response):
 
     await client.connect()
 
-    #se la sessione del client era attiva
-    if await client.is_user_authorized():
-        pass
-
-    #altrimenti ne crea un'altra
-    else:
+    if not await client.is_user_authorized():
         try:
             await client.disconnect()
             client = TelegramClient(StringSession(), vault_decyphered['api_id'], vault_decyphered['api_hash'])
@@ -94,7 +87,7 @@ async def login_user_expired(credentials: code, login_session: str = Cookie(None
     
     try:
         temp_id = cipher.decrypt(login_session.encode()).decode()
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Sessione invalida")
     
     global login_cache
@@ -117,10 +110,10 @@ async def login_user_expired(credentials: code, login_session: str = Cookie(None
     if 'masterkey' in temp_data['data']:
         data = temp_data['data'].copy()
         del data['masterkey']
-        vault_ciphered = cifra_vault(data, temp_data['data']['masterkey'])
+        vault_ciphered = encrypt_vault(data, temp_data['data']['masterkey'])
 
     else:
-        vault_ciphered = cifra_vault(temp_data['data'], temp_data['data']['masterkey'])
+        vault_ciphered = encrypt_vault(temp_data['data'], temp_data['data']['masterkey'])
     
     username = hashlib.sha256(pepper.encode() + temp_data['data']['username'].encode()).hexdigest()
     
@@ -146,9 +139,11 @@ async def logout(response: Response, login_session: str = Cookie(None)):
                 try:
                     await client.disconnect()
                 except Exception:
-                    pass
+                    raise HTTPException(status_code=500)
+
         except Exception:
-            pass
+            raise HTTPException(status_code=500)
+
 
     response.delete_cookie(
         key="login_session",

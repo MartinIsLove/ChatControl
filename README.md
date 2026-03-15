@@ -1,45 +1,60 @@
-# installazione e setup
+# ChatControl
 
-## 1. prerequisiti di sistema
+Pannello web per collegare un account Telegram, autenticarsi e gestire chat/messaggi in tempo reale.
 
-***installa le dipendenze necessarie***
+## Requisiti
+
+- Python 3.10+
+- Node.js 18+
+- OpenSSL (per i certificati HTTPS locali)
+
+## Setup backend
+
+1. Crea e attiva un virtual environment nella root del progetto.
+2. Installa le dipendenze:
+
 ```bash
-sudo apt install age openssl python3-pip
-```
-``` bash
-pip install fastapi uvicorn telethon cryptography
- ```
-## 2. setup ambiente
-
-***crea un file .env nella cartella principale del progetto come segue:***
-
-```python
-SECRET_PEPPER = 9ed4ecb784384de16c2dc5be86818e0b36db355438acd616a45367f50ffca648c4e5793f4b2e3711093b91b54720fb0dc81d11dbed4ceb8c006cdadd5a8efb5d
-SECRET_KEY = PgiGSC2uTj3fTcn4nURonH1CZtFhBw6B9Na1I7P7z7k=
+pip install -r requirements.txt
 ```
 
+3. Crea un file `.env` nella root con almeno:
 
+```env
+SECRET_PEPPER=<valore_lungo_casuale_esadecimale>
+SECRET_KEY=<chiave_base64>
+```
 
-## 3. generare i certificati
+## Certificati locali
 
-***posizionare i certificati in una cartella ../frontend/certs/ ed in una cartella ../backend/certs***
+Genera certificati self-signed e copia `cert.pem` + `key.pem` in entrambe le cartelle:
+
+- `Backend/certs/`
+- `Frontend/certs/`
+
+Comando esempio:
 
 ```bash
 openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 3650 -nodes
 ```
 
-## 3. lanciare il backend
+## Avvio backend
 
-***spostarsi nella cartella backend e lanciare il seguente comando***
+Dalla cartella `Backend/`:
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --ssl-keyfile ./key.pem --ssl-certfile ./cert.pem
+uvicorn main:app --host 0.0.0.0 --port 8000 --ssl-keyfile ./certs/key.pem --ssl-certfile ./certs/cert.pem
 ```
 
-## 4. lanciare il frontend
+## Avvio frontend
 
-***spostarsi nella cartella frontend e lanciare il seguente comando:***
+Dalla cartella `Frontend/`:
 
 ```bash
+npm install
 npm run dev
 ```
+
+## Note operative
+
+- Il frontend usa API HTTPS locali del backend.
+- Se apri da browser esterno, accetta il certificato self-signed la prima volta.

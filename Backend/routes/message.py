@@ -1,28 +1,18 @@
 from fastapi import APIRouter, Cookie, HTTPException, UploadFile, File, Form
-import asyncio
+import asyncio, time, hashlib, base64, json, tempfile, shutil, os, secrets, mimetypes, io
 from pydantic import BaseModel
 from config import pepper
-import time
-import hashlib
-import base64
-from cryptography_ import cifra_con_age, genera_chiavi, cifra_vault, derive_signing_keys_from_age_private, calcola_firma_messaggio
+from cryptography_ import encrypt_with_age, genera_chiavi, encrypt_vault, derive_signing_keys_from_age_private, calculate_message_sign
 from databaseInteractions import get_chat_chyper_keys, get_group_chyper_keys, set_user_vault
 from utils import  is_logged_in, split_message
-import json
-import tempfile
-import shutil
 from telethon.tl.types import DocumentAttributeFilename
-import os
-import secrets
-import mimetypes
-import io
 
 router = APIRouter()
 
 CAPTION_LIMIT = 1024
 MESSAGE_LIMIT = 4096
 MIN_UPLOAD_BPS = 32 * 1024
-PUBLIC_KEY_COOLDOWN = 60
+PUBLIC_KEY_COOLDOWN = 0
 
 class message (BaseModel):
     text: str
@@ -39,8 +29,8 @@ class iniz (BaseModel):
 
 async def send_public_if_not_exist(chat_id, login_session, client, chat_id_hash, data):
     chat_data = data.get('data', {}).get('chats', {}).get(chat_id_hash, {})
-    chiave_corrente_chat = _get_current_local_age_key(chat_data)
-    if not chiave_corrente_chat or not chiave_corrente_chat.get('pubblica'):
+    current_key = _get_current_local_age_key(chat_data)
+    if not current_key or not current_key.get('pubblica'):
             key_response = await send_public_key(iniz(chat_id=chat_id), login_session)
             public_key = key_response.get("public") if isinstance(key_response, dict) else None
             if public_key:
@@ -48,9 +38,9 @@ async def send_public_if_not_exist(chat_id, login_session, client, chat_id_hash,
                 if not key_visible:
                     raise HTTPException(status_code=503, detail="Chiave non visibile in chat, riprova")
             chat_data = data.get('data', {}).get('chats', {}).get(chat_id_hash, {})
-            chiave_corrente_chat = _get_current_local_age_key(chat_data)
+            current_key = _get_current_local_age_key(chat_data)
 
-def _ensure_chat_seq(data: dict, chat_id_hash: str) -> int:
+def _ensure_chat_seq(data: dict, chat_id_hash: str):
     chats = data.setdefault('data', {}).setdefault('chats', {})
     chat_entry = chats.get(chat_id_hash)
     if not isinstance(chat_entry, dict):
@@ -157,8 +147,8 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
         try:
             file_content = await file.read()
 
-            guessed_mime, _ = mimetypes.guess_type(file.filename)
-            mime_type = guessed_mime or file.content_type or "application/octet-stream"
+            tmp_mime, _ = mimetypes.guess_type(file.filename)
+            mime = tmp_mime or file.content_type or "application/octet-stream"
 
 
             chat_entry = data.get('data', {}).get('chats', {}).get(chat_id_hash, {})
@@ -178,20 +168,20 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
             if 'masterkey' in data['data']:
                 temp_data = data['data'].copy()
                 del temp_data['masterkey']
-                vault_cifrato = cifra_vault(temp_data, data['data']['masterkey'])
+                vault_ciphered = encrypt_vault(temp_data, data['data']['masterkey'])
             
             else:
-                vault_cifrato = cifra_vault(data['data'], data['data']['masterkey'])
+                vault_ciphered = encrypt_vault(data['data'], data['data']['masterkey'])
                 
-            set_user_vault(username, vault_cifrato)
+            set_user_vault(username, vault_ciphered)
 
-            sign = calcola_firma_messaggio(sign_private, seq, kid, kid_cif, id_mess, "file")
+            sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_mess, "file")
 
             metadata = {
                 "filename": file.filename,
                 "cif": "file",
                 "text": text,
-                "mime": mime_type,
+                "mime": mime,
                 "size": len(file_content),
                 "id": id_mess,
                 "kid": kid,
@@ -204,12 +194,12 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
             metadata_bytes = json_metadata.encode('utf-8')
             metadata_size = len(metadata_bytes)
 
-            encrypted_metadata = cifra_con_age(metadata_bytes, recipient_keys)
+            encrypted_metadata = encrypt_with_age(metadata_bytes, recipient_keys)
             if encrypted_metadata is None:
                 raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
 
             body_plain = metadata_size.to_bytes(4, byteorder='big') + metadata_bytes + file_content
-            encrypted_body = cifra_con_age(body_plain, recipient_keys)
+            encrypted_body = encrypt_with_age(body_plain, recipient_keys)
             if encrypted_body is None:
                 raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
 
@@ -278,7 +268,6 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
         except HTTPException:
             raise
         except Exception as e:
-            print(e)
             raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
         
 #questa funzione invia un messaggio normale o cifrato
@@ -286,7 +275,6 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
 async def s_message( credentials: message, login_session: str = Cookie(None)):
     _, data = is_logged_in(login_session, True)
     client = data['client']
-    print(data)    
 
     if not client.is_connected():
         await client.connect()
@@ -322,25 +310,28 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
         kid = chat_entry.get('kid_corrente')
         kid_cif = chat_entry.get('kid_cif_corrente')
         sign_private = chat_entry.get('kid', {}).get(kid) if kid else None
+
         if not isinstance(kid_cif, str) or not kid_cif:
             raise HTTPException(status_code=500, detail="Chiave di cifratura corrente non disponibile")
+        
         seq = _ensure_chat_seq(data, chat_id_hash) + 1
         data['data']['chats'][chat_id_hash]['seq'] = seq
         username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
+
         if 'masterkey' in data['data']:
             temp_data = data['data'].copy()
             del temp_data['masterkey']
-            vault_cifrato = cifra_vault(temp_data, data['data']['masterkey'])
+            vault_ciphered = encrypt_vault(temp_data, data['data']['masterkey'])
         
         else:
-            vault_cifrato = cifra_vault(data['data'], data['data']['masterkey'])
+            vault_ciphered = encrypt_vault(data['data'], data['data']['masterkey'])
 
-        set_user_vault(username, vault_cifrato)
+        set_user_vault(username, vault_ciphered)
 
         if not sign_private:
             raise HTTPException(status_code=500, detail="Chiave di firma corrente non disponibile")
 
-        sign = calcola_firma_messaggio(sign_private, seq, kid, kid_cif, id_messagge, "on")
+        sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_messagge, "on")
 
         da_cifrare ={
             "cif" : "on",
@@ -354,8 +345,7 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
 
         json_da_cifrare = json.dumps(da_cifrare, sort_keys= True)
 
-
-        text_cyp = cifra_con_age(json_da_cifrare, recipient_keys)
+        text_cyp = encrypt_with_age(json_da_cifrare, recipient_keys)
         
         if text_cyp is None:
             raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
@@ -364,7 +354,7 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
         #ovvero 4096 caratteri, nel caso positivo gestisce l'invio del messaggio come file,
         #per evitare splittamenti
         if len(text_cyp) > MESSAGE_LIMIT:
-            sign = calcola_firma_messaggio(sign_private, seq, kid, kid_cif, id_messagge, "message")
+            sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_messagge, "message")
             token = secrets.token_hex(8)
             nome_file = token + ".dat"
             message_bytes = credentials.text.encode("utf-8")
@@ -380,7 +370,7 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
             metadata_bytes = json_metadata.encode("utf-8")
             metadata_size = len(metadata_bytes)
             payload = metadata_size.to_bytes(4, byteorder="big") + metadata_bytes + message_bytes
-            encrypted_payload = cifra_con_age(payload, recipient_keys)
+            encrypted_payload = encrypt_with_age(payload, recipient_keys)
             if encrypted_payload is None:
                 raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
 
@@ -443,18 +433,17 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
         data['data']['chats'] = {}
     
     chat_data = data['data']['chats'].get(chat_id_hash, {})
-    chiave_corrente_chat = _get_current_local_age_key(chat_data)
+    current_key = _get_current_local_age_key(chat_data)
     
-    if chiave_corrente_chat and chiave_corrente_chat.get('inizio'):
-        inizio_corrente = chiave_corrente_chat.get('inizio', 0)
+    if current_key and current_key.get('inizio'):
+        inizio_corrente = current_key.get('inizio', 0)
         if time.time() - inizio_corrente < PUBLIC_KEY_COOLDOWN:
             raise HTTPException(status_code=409, detail="Aspetta più tempo per generare un'altra chiave per questa chat")
 
-    pubblica, privata = genera_chiavi()
+    public, privata = genera_chiavi()
 
     derivated = derive_signing_keys_from_age_private(privata)
-    second_kid_raw = hashlib.sha256(privata.encode("ascii")).digest()[:16]
-    second_kid = base64.urlsafe_b64encode(second_kid_raw).decode().rstrip("=")
+    second_kid = base64.urlsafe_b64encode(hashlib.sha256(privata.encode("ascii")).digest()[:16]).decode().rstrip("=")
 
     existing_age_kid_map = chat_data.get('chiavi_cif', {})
     if not isinstance(existing_age_kid_map, dict):
@@ -462,12 +451,11 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
     updated_age_kid_map = dict(existing_age_kid_map)
     updated_age_kid_map[second_kid] = {
         'privata': privata,
-        'pubblica': pubblica,
+        'pubblica': public,
         'inizio': time.time(),
     }
     
-    existing_kid_map = chat_data.get('kid', {}) if isinstance(chat_data.get('kid', {}), dict) else {}
-    updated_kid_map = dict(existing_kid_map)
+    updated_kid_map = dict(chat_data.get('kid', {}) if isinstance(chat_data.get('kid', {}), dict) else {})
     updated_kid_map[derivated['kid']] = derivated['private_key']
 
     seq_value = chat_data.get('seq') if isinstance(chat_data.get('seq'), int) else 0
@@ -483,16 +471,16 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
     if 'masterkey' in data['data']:
         temp_data = data['data'].copy()
         del temp_data['masterkey']
-        vault_cifrato = cifra_vault(temp_data, data['data']['masterkey'])
+        ciphered_vault = encrypt_vault(temp_data, data['data']['masterkey'])
         
     else:
-        vault_cifrato = cifra_vault(data['data'], data['data']['masterkey'])
+        ciphered_vault = encrypt_vault(data['data'], data['data']['masterkey'])
 
-    set_user_vault(username, vault_cifrato)
+    set_user_vault(username, ciphered_vault)
 
     message_payload = {
         "cif":"in",
-        "public":pubblica,
+        "public":public,
         'kid': derivated['kid'],
         'kid_cif': second_kid,
         'pub_sign': derivated['public_key']
@@ -502,10 +490,10 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
         await client.send_message(credentials.chat_id, json.dumps(message_payload))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
-    print(data)
+
     return {
         "status": "ok",
-        "public": pubblica,
+        "public": public,
         "kid_corrente": derivated['kid'],
         "kid_cif_corrente": second_kid,
     }

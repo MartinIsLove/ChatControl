@@ -1,9 +1,7 @@
 from cryptography.fernet import Fernet
-from cryptography.fernet import Fernet
 from config import secret_key
 from fastapi import Cookie, HTTPException
-import time
-import re
+import time, re
 from telethon.tl.types import DocumentAttributeAnimated
 from pydantic import BaseModel
 
@@ -65,42 +63,35 @@ def build_candidate_privates(chat_keys: dict, kid_cif: str | None = None):
         seen.add(value)
         candidate_privates.append(value)
 
-    # New schema: map kid_cif -> {privata, pubblica, ...}
     age_key_map = chat_keys.get('chiavi_cif', {})
 
-    if isinstance(age_key_map, dict):
-        selected_key = None
-        if isinstance(kid_cif, str) and kid_cif.strip():
-            selected_key = age_key_map.get(kid_cif)
-        if not isinstance(selected_key, dict):
-            current_kid_cif = chat_keys.get('kid_cif_corrente')
-            if isinstance(current_kid_cif, str):
-                selected_key = age_key_map.get(current_kid_cif)
+    
+    selected_key = None
+    selected_key = age_key_map.get(kid_cif)
 
-        if isinstance(selected_key, dict):
-            _append_private(selected_key.get('privata'))
+    current_kid_cif = chat_keys.get('kid_cif_corrente')
 
-        for _, key_data in sorted(
-            age_key_map.items(),
-            key=lambda item: (item[1] or {}).get('inizio', 0),
-            reverse=True,
-        ):
-            if isinstance(key_data, dict):
-                _append_private(key_data.get('privata'))
+    selected_key = age_key_map.get(current_kid_cif)
+    
+    _append_private(selected_key.get('privata'))
 
-        if candidate_privates:
-            return candidate_privates
+    for _, key_data in sorted(
+        age_key_map.items(),
+        key=lambda item: (item[1] or {}).get('inizio', 0),
+        reverse=True,
+    ):
+        _append_private(key_data.get('privata'))
 
     return candidate_privates
 
-#questa funzione ritorna se la chat e' un gruppo oppure no
+#questa funzione ritorna se la conversazione è un gruppo oppure no
 def is_group_chat_id(chat_id: int) -> bool:
     try:
         return int(chat_id) < 0
     except Exception:
         return False
     
-#questa funzione mi gestisce i media per renderli comprensibili al frontend
+#questa funzione gestisce i media per renderli comprensibili al frontend
 def set_media(msg, message_data):
     message_data['file'] = True
             

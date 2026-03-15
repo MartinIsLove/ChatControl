@@ -1,16 +1,12 @@
 from fastapi import APIRouter, Response, Cookie, HTTPException
-import sqlite3
 from pydantic import BaseModel
-from database.sqlite import get_connection, db_lock
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
-import secrets
+import secrets, hashlib, time
 from cryptography.fernet import Fernet
 from config import pepper, secret_key
-import hashlib
-import time
-from cryptography_ import deriva_master_key, cifra_vault
+from cryptography_ import derivate_master_key, encrypt_vault
 from utils import  login_cache
 from databaseInteractions import check_username_unicity, add_user
 
@@ -53,7 +49,7 @@ async def create_user(credentials: UserData, response: Response):
         "phone":credentials.phone,
         "phone_code_hash": sent_code.phone_code_hash,
         "salt": salt,
-        "masterkey_derived":deriva_master_key(credentials.password, salt),
+        "masterkey_derived":derivate_master_key(credentials.password, salt),
         "api_id":credentials.api_id,
         "api_hash":credentials.api_hash,
         "username":username,
@@ -80,7 +76,7 @@ async def sign_up_verify(credentials: signupped, signup_session: str = Cookie(No
     
     try:
         temp_id = cipher.decrypt(signup_session.encode()).decode()
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Sessione invalida")
     
     temp_data = signup_cache.get(temp_id)
@@ -110,10 +106,10 @@ async def sign_up_verify(credentials: signupped, signup_session: str = Cookie(No
         "session": session_str,
     }
     
-    vault_cifrato = cifra_vault(da_cifrare, temp_data['masterkey_derived'])
+    vault_ciphered = encrypt_vault(da_cifrare, temp_data['masterkey_derived'])
 
     
-    add_user(temp_data, vault_cifrato)
+    add_user(temp_data, vault_ciphered)
     
     response.delete_cookie("signup_session")
 
@@ -145,7 +141,7 @@ async def sign_up_verify_password(credentials: signupped_2fa, signup_session: st
     
     try:
         temp_id = cipher.decrypt(signup_session.encode()).decode()
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Sessione invalida")
 
     temp_data = signup_cache.get(temp_id)
@@ -161,7 +157,7 @@ async def sign_up_verify_password(credentials: signupped_2fa, signup_session: st
 
 
 
-    da_cifrare = {
+    to_ciph = {
         "phone": temp_data['phone'],
         "api_id": temp_data['api_id'],
         "api_hash": temp_data['api_hash'],
@@ -172,17 +168,17 @@ async def sign_up_verify_password(credentials: signupped_2fa, signup_session: st
 
     }
     
-    vault_cifrato = cifra_vault(da_cifrare, temp_data['masterkey_derived'])
+    vault_ciphered = encrypt_vault(to_ciph, temp_data['masterkey_derived'])
 
-    add_user(temp_data, vault_cifrato)
+    add_user(temp_data, vault_ciphered)
     
     response.delete_cookie("signup_session")
     
     temp_id = secrets.token_hex(16)
     temp_id_encrypted = cipher.encrypt(temp_id.encode()).decode()
-    da_cifrare['masterkey'] = temp_data['masterkey_derived'].decode() if isinstance(temp_data['masterkey_derived'], bytes) else temp_data['masterkey_derived']
+    to_ciph['masterkey'] = temp_data['masterkey_derived'].decode() if isinstance(temp_data['masterkey_derived'], bytes) else temp_data['masterkey_derived']
     login_cache[temp_id] = {
-        "data" : da_cifrare,
+        "data" : to_ciph,
         "time" : time.time(),
         "client" : client
     }

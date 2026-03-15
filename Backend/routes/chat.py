@@ -1,23 +1,15 @@
 from fastapi import APIRouter, Cookie, WebSocket, WebSocketDisconnect, HTTPException
-import sqlite3
+import sqlite3, hashlib, json, base64, subprocess, tempfile, io, os, mimetypes
 from database.sqlite import get_connection, db_lock
 from config import pepper
-import hashlib
-from databaseInteractions import store_public_key_in_vault, get_gruppo_vault, get_chat_vault
-from cryptography_ import decifra_file_con_age, verifica_firma_messaggio, calcola_firma_messaggio, cifra_vault
+from databaseInteractions import store_public_key_in_vault, get_gruppo_vault, get_chat_vault, chats_vault_update
+from cryptography_ import decrypt_file_with_age, verify_message_sign, calculate_message_sign, encrypt_vault
 from utils import is_logged_in, is_valid_age_public_key, is_group_chat_id, build_candidate_privates, set_media
 from realtime import connect_socket, disconnect_socket, register_telethon_handlers, index_messages
 from telethon.tl.types import MessageService, MessageActionChatCreate, MessageActionChatDeleteUser, MessageActionChatAddUser, MessageActionPinMessage
 from datetime import datetime
-import json
-import base64
-import subprocess
-import tempfile
-import asyncio
 from fastapi.responses import StreamingResponse
-import io
-import os
-import mimetypes
+
 
 router = APIRouter()
 
@@ -157,7 +149,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
 
     me = await client.get_me()
     my_id = me.id if me else None
-    print(vault)
+    seq_dirty = False
     
     def verify_signed_payload(sender_id, payload_id, payload_kid, payload_kid_cif, payload_seq, payload_cif, payload_sign):
         if not isinstance(payload_id, str) or not payload_id.strip():
@@ -177,26 +169,27 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
             if not sign_private:
                 return False, "chiave di firma locale non disponibile"
             try:
-                expected_sign = calcola_firma_messaggio(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif)
+                expected_sign = calculate_message_sign(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif)
             except ValueError:
                 return False, "questo messaggio e' stato modificato"
             return (payload_sign == expected_sign), "questo messaggio e' stato modificato"
 
-        user_str = str(sender_id) if sender_id is not None else None
+        user_str = str(sender_id)
         if is_group_chat_id(chat_id):
-            participant_data = vault.get(user_str) if isinstance(vault, dict) else None
+            _, vault = get_gruppo_vault(username, chat_id, entity, data)
+            participant_data = vault.get('partecipanti').get(user_str)
             if participant_data is None and isinstance(vault, dict):
-                participant_data = vault.get(sender_id)
-            signing_keys = participant_data.get('chiavi_firma', {}) if isinstance(participant_data, dict) else {}
+                participant_data = chat_vault.get(sender_id)
+            signing_keys = participant_data.get('chiavi_firma') 
         else:
-            signing_keys = vault.get('chiavi_firma', {}) if isinstance(vault, dict) else {}
+            signing_keys = chat_vault.get('chiavi_firma', {}) 
 
-        if not isinstance(signing_keys, dict) or payload_kid not in signing_keys:
+        if payload_kid not in signing_keys:
             return False, "chiave di firma mittente non disponibile"
 
         pub_sign = signing_keys.get(payload_kid)
         try:
-            return verifica_firma_messaggio(pub_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, payload_sign), "questo messaggio e' stato modificato"
+            return verify_message_sign(pub_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, payload_sign), "questo messaggio e' stato modificato"
         except ValueError:
             return False, "questo messaggio e' stato modificato"
 
@@ -221,8 +214,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
         if sender_id is None or not isinstance(seq_value, int):
             return False
 
-        # History scan via Telegram API for same sender and same seq.
-        async for history_msg in client.iter_messages(entity, from_user=sender_id, limit=400, max_id=current_msg_id-1):
+        async for history_msg in client.iter_messages(entity, from_user=sender_id, limit=100, max_id=current_msg_id-1):
             if history_msg.id == current_msg_id:
                 continue
 
@@ -251,7 +243,6 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
     async def mark_replay_on_chunk_boundary(messages_list):
         oldest_by_sender = {}
 
-        # Walk oldest -> newest and keep first secure message for each sender.
         for item in reversed(messages_list):
             sender_key = item.get('_secure_sender_key')
             seq_value = item.get('_secure_seq')
@@ -275,26 +266,26 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
         if not oldest_by_sender:
             return
 
-        checks = []
-        refs = []
-        for candidate in oldest_by_sender.values():
-            checks.append(
-                has_duplicate_seq_in_history(
+        candidates = list(oldest_by_sender.values())
+
+        for candidate in candidates:
+            try:
+                result = await has_duplicate_seq_in_history(
                     candidate['sender_id'],
                     candidate['seq'],
                     candidate['message_id']
                 )
-            )
-            refs.append(candidate['message_ref'])
+            except Exception:
+                continue
 
-        results = await asyncio.gather(*checks, return_exceptions=True)
-        for message_ref, result in zip(refs, results):
             if result is True:
+                message_ref = candidate['message_ref']
                 message_ref['error'] = "questo messaggio e' un reply attack"
                 message_ref.pop('secure', None)
                 message_ref.pop('chiave', None)
 
     def update_max_seq_in_vault(sender_id, seq_value):
+        nonlocal seq_dirty
         if not isinstance(seq_value, int):
             return
 
@@ -310,10 +301,12 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
             current_seq = participant_data.get('seq')
             if current_seq is None or seq_value > current_seq:
                 participant_data['seq'] = seq_value
+                seq_dirty = True
         else:
             current_seq = vault.get('seq') if isinstance(vault.get('seq'), int) else None
             if current_seq is None or seq_value > current_seq:
                 vault['seq'] = seq_value
+                seq_dirty = True
 
     messages = []
     add_offset = start if start and start > 0 else 0
@@ -373,7 +366,6 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
             'system_type': system_message,
         }
         
-        # Estrai dati del media se presente
         if msg.media:
             set_media(msg, message_data)
         
@@ -381,66 +373,65 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
 
     await index_messages(temp_id, chat_id, [m.get("id") for m in messages if m.get("id") is not None])
 
-    for message in messages:
-        if message['system_type']:
+    for mess in messages:
+        if mess['system_type']:
             continue
         
-        text = message.get('text') or ''
+        text = mess.get('text') or ''
         try:
             parsed = json.loads(text)
             if isinstance(parsed, dict):
-                message['json'] = parsed
-                message['is_json'] = True
+                mess['json'] = parsed
+                mess['is_json'] = True
             else:
-                message['is_json'] = False
+                mess['is_json'] = False
         except Exception:
-            message['is_json'] = False
+            mess['is_json'] = False
         
-        if message['is_json'] == True:
-            cif_flag = message['json'].get('CIF') or message['json'].get('cif')
+        if mess['is_json'] == True:
+            cif_flag = mess['json'].get('CIF') or mess['json'].get('cif')
             if cif_flag == "in":            
-                if my_id and message.get('sender_id') == my_id:
-                    message['is_json'] = False
-                    message['text'] = None
-                    message['chiave'] = "Questo messaggio e' uno scambio di chiave"
-                    message['is_system'] = True
+                if my_id and mess.get('sender_id') == my_id:
+                    mess['is_json'] = False
+                    mess['text'] = None
+                    mess['chiave'] = "Questo messaggio e' uno scambio di chiave"
+                    mess['is_system'] = True
                     continue
-                pubblic = message['json'].get('public')
-                kid = message['json'].get('kid')
-                kid_cif = message['json'].get('kid_cif')
-                pub_sign = message['json'].get('pub_sign')
-                if pubblic is None or not is_valid_age_public_key(pubblic) or pub_sign is None:
+                public = mess['json'].get('public')
+                kid = mess['json'].get('kid')
+                kid_cif = mess['json'].get('kid_cif')
+                pub_sign = mess['json'].get('pub_sign')
+                if public is None or not is_valid_age_public_key(public) or pub_sign is None:
                     
                     continue
                 store_public_key_in_vault(
                     data,
                     chat_id,
-                    message.get('sender_id'),
-                    pubblic,
+                    mess.get('sender_id'),
+                    public,
                     kid=kid,
                     kid_cif=kid_cif,
                     pub_sign=pub_sign,
-                    msg_date=message.get('date'),
+                    msg_date=mess.get('date'),
                     is_group=is_group_chat_id(chat_id),
                     group_title=getattr(entity, 'title', 'Gruppo')
                 )
-                message['text'] = None
-                message['chiave'] = "Questo messaggio e' uno scambio di chiave"
-                message['is_system'] = True
+                mess['text'] = None
+                mess['chiave'] = "Questo messaggio e' uno scambio di chiave"
+                mess['is_system'] = True
                 
             if cif_flag == "on":
-                text = message['json'].get('text')
-                id_message_decifrato_caption = message['json'].get('id')
-                seq = message['json'].get('seq')
-                kid = message['json'].get('kid')
-                kid_cif = message['json'].get('kid_cif') or message['json'].get('kid_age')
-                sign = message['json'].get('sign')
+                text = mess['json'].get('text')
+                mess_decrypted_id_caption = mess['json'].get('id')
+                seq = mess['json'].get('seq')
+                kid = mess['json'].get('kid')
+                kid_cif = mess['json'].get('kid_cif') or mess['json'].get('kid_age')
+                sign = mess['json'].get('sign')
                 
                 
-                timestamp = message.get('date')
-                firma, firma_error = verify_signed_payload(
-                    message.get('sender_id'),
-                    id_message_decifrato_caption,
+                firma, sign_error = verify_signed_payload(
+                    mess.get('sender_id'),
+                    mess_decrypted_id_caption,
                     kid,
                     kid_cif,
                     seq,
@@ -448,20 +439,20 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                     sign,
                 )
                 if not firma:
-                    message['error'] = firma_error
-                    if 'json' in message:
-                        del message['json']
-                    message['is_json'] = False
+                    mess['error'] = sign_error
+                    if 'json' in mess:
+                        del mess['json']
+                    mess['is_json'] = False
                     continue
                 
                 chats_data = data['data'].get('chats', {})
                 chat_keys = chats_data.get(chat_id_cif, {})
                 candidate_privates = build_candidate_privates(chat_keys, kid_cif=kid_cif)
 
-                text_decifrato = None
+                decrypted_text = None
                 
 
-                for privata in candidate_privates:
+                for private in candidate_privates:
                     try:
                         
                         try:
@@ -470,7 +461,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                             text_bytes = text.encode()
                         
                         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
-                            keyfile.write(privata)
+                            keyfile.write(private)
                             keyfile_path = keyfile.name
                         try:
                             result = subprocess.run(
@@ -479,62 +470,61 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                                 capture_output=True,
                                 check=True
                             )
-                            text_decifrato = result.stdout.decode()
+                            decrypted_text = result.stdout.decode()
                             break
                         finally:
-                            import os
                             os.unlink(keyfile_path)
                     except Exception as e:
                         
                         continue
-                if text_decifrato:
+                if decrypted_text:
                     try:
-                        dizionario = json.loads(text_decifrato)
+                        dic_mes = json.loads(decrypted_text)
                         
-                        if dizionario['cif'] == "on":
-                            id_message_decifrato = dizionario.get('id')
-                            sign_inside = dizionario.get('sign')
-                            kid_inside = dizionario.get('kid')
-                            kid_cif_inside = dizionario.get('kid_cif')
+                        if dic_mes['cif'] == "on":
+                            message_decrypted_id = dic_mes.get('id')
+                            sign_inside = dic_mes.get('sign')
+                            kid_inside = dic_mes.get('kid')
+                            kid_cif_inside = dic_mes.get('kid_cif')
                            
-                            if id_message_decifrato_caption != id_message_decifrato or sign_inside != sign or kid_inside != kid or (kid_cif and kid_cif_inside != kid_cif):
-                                message['error'] = "questo messaggio e' stato modificato"
-                                if 'json' in message:
-                                    del message['json']
-                                message['is_json'] = False
+                            if mess_decrypted_id_caption != message_decrypted_id or sign_inside != sign or kid_inside != kid or (kid_cif and kid_cif_inside != kid_cif):
+                                mess['error'] = "questo messaggio e' stato modificato"
+                                if 'json' in mess:
+                                    del mess['json']
+                                mess['is_json'] = False
                                 continue
-                            sender_key = str(message.get('sender_id')) if message.get('sender_id') is not None else "unknown"
-                            message['_secure_seq'] = seq
-                            message['_secure_sender_key'] = sender_key
-                            update_max_seq_in_vault(message.get('sender_id'), seq)
+                            sender_key = str(mess.get('sender_id')) if mess.get('sender_id') is not None else "unknown"
+                            mess['_secure_seq'] = seq
+                            mess['_secure_sender_key'] = sender_key
+                            update_max_seq_in_vault(mess.get('sender_id'), seq)
 
-                            message['text'] = dizionario['text']
-                            message['secure'] = True
+                            mess['text'] = dic_mes['text']
+                            mess['secure'] = True
                             
-                            if 'json' in message:
-                                del message['json']
-                            message['is_json'] = False
+                            if 'json' in mess:
+                                del mess['json']
+                            mess['is_json'] = False
                         else:
-                            message['error'] = "questo messaggio e' stato modificato"
-                            if 'json' in message:
-                                del message['json']
-                            message['is_json'] = False
+                            mess['error'] = "questo messaggio e' stato modificato"
+                            if 'json' in mess:
+                                del mess['json']
+                            mess['is_json'] = False
                     except Exception as e:
-                        import traceback
-                        traceback.print_exc()
+                        raise HTTPException(status_code=500)
+
 
             if cif_flag == "file":
 
-                message_id = message.get('id')
-                id_message_decifrato_caption = message['json'].get('id')
-                seq = message['json'].get('seq')
-                kid = message['json'].get('kid')
-                kid_cif = message['json'].get('kid_cif')
-                sign = message['json'].get('sign')
+                mess_id = mess.get('id')
+                mess_decrypted_id_caption = mess['json'].get('id')
+                seq = mess['json'].get('seq')
+                kid = mess['json'].get('kid')
+                kid_cif = mess['json'].get('kid_cif')
+                sign = mess['json'].get('sign')
 
-                firma, firma_error = verify_signed_payload(
-                    message.get('sender_id'),
-                    id_message_decifrato_caption,
+                firma, sign_error = verify_signed_payload(
+                    mess.get('sender_id'),
+                    mess_decrypted_id_caption,
                     kid,
                     kid_cif,
                     seq,
@@ -542,15 +532,14 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                     sign,
                 )
                 if not firma:
-                    message['error'] = firma_error
-                    if 'json' in message:
-                        del message['json']
-                    message['is_json'] = False
+                    mess['error'] = sign_error
+                    if 'json' in mess:
+                        del mess['json']
+                    mess['is_json'] = False
                     continue
-                if message_id:
-                    full_message = await client.get_messages(entity, ids=message_id)
+                if mess_id:
+                    full_message = await client.get_messages(entity, ids=mess_id)
                     if full_message and full_message.media:
-                        import io
                         file_bytes = io.BytesIO()
                         max_bytes = 64 * 1024
                         downloaded = 0
@@ -563,34 +552,30 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                                 break
                         file_bytes.seek(0)
                         file_head_bytes = file_bytes.getvalue()
-                        message['file_head'] = base64.b64encode(file_head_bytes).decode()
-                        message['file_head_size'] = len(file_head_bytes)
+                        mess['file_head'] = base64.b64encode(file_head_bytes).decode()
+                        mess['file_head_size'] = len(file_head_bytes)
 
-                        header_metadata_size = None
                         header_encrypted_metadata = None
                         if len(file_head_bytes) >= 8:
-                            header_metadata_size = int.from_bytes(file_head_bytes[:4], byteorder='big')
                             header_encrypted_size = int.from_bytes(file_head_bytes[4:8], byteorder='big')
                             if 0 < header_encrypted_size <= len(file_head_bytes) - 8:
                                 header_encrypted_metadata = file_head_bytes[8:8 + header_encrypted_size]
     
 
-                timestamp = message.get('date')
-
                 chats_data = data['data'].get('chats', {})
                 chat_keys = chats_data.get(chat_id_cif, {})
                 candidate_privates = build_candidate_privates(chat_keys, kid_cif=kid_cif)
 
-                text_decifrato = None
+                decrypted_text = None
                 if header_encrypted_metadata:
-                    for privata in candidate_privates:
+                    for private in candidate_privates:
                         try:
                             try:
                                 input_bytes = base64.b64decode(header_encrypted_metadata)
                             except Exception:
                                 input_bytes = header_encrypted_metadata
                             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
-                                keyfile.write(privata)
+                                keyfile.write(private)
                                 keyfile_path = keyfile.name
                             try:
                                 result = subprocess.run(
@@ -599,67 +584,66 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                                     capture_output=True,
                                     check=True
                                 )
-                                text_decifrato = result.stdout.decode()
+                                decrypted_text = result.stdout.decode()
                                 break
                             finally:
-                                import os
                                 os.unlink(keyfile_path)
                         except Exception:
                             continue
 
-                if text_decifrato:
+                if decrypted_text:
                     try:
-                        dizionario = json.loads(text_decifrato)
-                        if dizionario['cif'] == "file":
+                        dic_mes = json.loads(decrypted_text)
+                        if dic_mes['cif'] == "file":
                             
-                            id_message_decifrato = dizionario.get('id')
-                            sign_inside = dizionario.get('sign')
-                            kid_inside = dizionario.get('kid')
-                            kid_cif_inside = dizionario.get('kid_cif')
+                            message_decrypted_id = dic_mes.get('id')
+                            sign_inside = dic_mes.get('sign')
+                            kid_inside = dic_mes.get('kid')
+                            kid_cif_inside = dic_mes.get('kid_cif')
 
-                            if id_message_decifrato_caption != id_message_decifrato or sign_inside != sign or kid_inside != kid or (kid_cif and kid_cif_inside != kid_cif):
-                                message['error'] = "questo messaggio e' stato modificato"
-                                if 'json' in message:
-                                    del message['json']
-                                message['is_json'] = False
+                            if mess_decrypted_id_caption != message_decrypted_id or sign_inside != sign or kid_inside != kid or (kid_cif and kid_cif_inside != kid_cif):
+                                mess['error'] = "questo messaggio e' stato modificato"
+                                if 'json' in mess:
+                                    del mess['json']
+                                mess['is_json'] = False
                                 continue
                             
-                            message['file'] = True
-                            message['filename'] = dizionario['filename']
-                            message['text'] = dizionario['text']
-                            message['mime'] = dizionario['mime']
-                            message['size'] = dizionario['size']
-                            message['secure'] = True
-                            sender_key = str(message.get('sender_id')) if message.get('sender_id') is not None else "unknown"
-                            message['_secure_seq'] = seq
-                            message['_secure_sender_key'] = sender_key
-                            update_max_seq_in_vault(message.get('sender_id'), seq)
+                            mess['file'] = True
+                            mess['filename'] = dic_mes['filename']
+                            mess['text'] = dic_mes['text']
+                            mess['mime'] = dic_mes['mime']
+                            mess['size'] = dic_mes['size']
+                            mess['secure'] = True
+                            sender_key = str(mess.get('sender_id')) if mess.get('sender_id') is not None else "unknown"
+                            mess['_secure_seq'] = seq
+                            mess['_secure_sender_key'] = sender_key
+                            update_max_seq_in_vault(mess.get('sender_id'), seq)
 
 
-                            if 'json' in message:
-                                del message['json']
-                            message['is_json'] = False
+                            if 'json' in mess:
+                                del mess['json']
+                            mess['is_json'] = False
                         else:
-                            message['error'] = "questo messaggio e' stato modificato"
-                            if 'json' in message:
-                                del message['json']
-                            message['is_json'] = False
+                            mess['error'] = "questo messaggio e' stato modificato"
+                            if 'json' in mess:
+                                del mess['json']
+                            mess['is_json'] = False
                     except Exception as e:
-                        import traceback
-                        traceback.print_exc()
+                        raise HTTPException(status_code=500)
+
             
             if cif_flag == "message":
                 try:
-                    message_id = message.get('id')
-                    id_message_decifrato_caption = message['json'].get('id')
-                    seq = message['json'].get('seq')
-                    kid = message['json'].get('kid')
-                    kid_cif = message['json'].get('kid_cif')
-                    sign = message['json'].get('sign')
+                    mess_id = mess.get('id')
+                    mess_decrypted_id_caption = mess['json'].get('id')
+                    seq = mess['json'].get('seq')
+                    kid = mess['json'].get('kid')
+                    kid_cif = mess['json'].get('kid_cif')
+                    sign = mess['json'].get('sign')
 
-                    firma, firma_error = verify_signed_payload(
-                        message.get('sender_id'),
-                        id_message_decifrato_caption,
+                    firma, sign_error = verify_signed_payload(
+                        mess.get('sender_id'),
+                        mess_decrypted_id_caption,
                         kid,
                         kid_cif,
                         seq,
@@ -667,38 +651,36 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                         sign,
                     )
                     if not firma:
-                        message['error'] = firma_error
-                        if 'json' in message:
-                            del message['json']
-                        message['is_json'] = False
+                        mess['error'] = sign_error
+                        if 'json' in mess:
+                            del mess['json']
+                        mess['is_json'] = False
                         continue
-                    if not message_id:
+                    if not mess_id:
                         continue
 
-                    full_message = await client.get_messages(entity, ids=message_id)
+                    full_message = await client.get_messages(entity, ids=mess_id)
                     if not full_message or not full_message.media or not full_message.document:
                         continue
 
-                    import io
                     file_bytes = io.BytesIO()
                     await client.download_media(full_message, file=file_bytes)
                     file_bytes.seek(0)
                     encrypted_payload = file_bytes.getvalue()
 
-                    timestamp = message.get('date')
                     chats_data = data['data'].get('chats', {})
                     chat_keys = chats_data.get(chat_id_cif, {})
                     candidate_privates = build_candidate_privates(chat_keys, kid_cif=kid_cif)
 
                     decrypted_payload = None
-                    for privata in candidate_privates:
+                    for private in candidate_privates:
                         try:
                             try:
                                 input_bytes = base64.b64decode(encrypted_payload)
                             except Exception:
                                 input_bytes = encrypted_payload
                             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
-                                keyfile.write(privata)
+                                keyfile.write(private)
                                 keyfile_path = keyfile.name
                             try:
                                 result = subprocess.run(
@@ -710,7 +692,6 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                                 decrypted_payload = result.stdout
                                 break
                             finally:
-                                import os
                                 os.unlink(keyfile_path)
                         except Exception:
                             continue
@@ -728,8 +709,8 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                                 inner_metadata = None
 
                             if inner_metadata and inner_metadata.get('cif') == 'message':
-                                firma, firma_error = verify_signed_payload(
-                                    message.get('sender_id'),
+                                firma, sign_error = verify_signed_payload(
+                                    mess.get('sender_id'),
                                     inner_metadata.get('id'),
                                     inner_metadata.get('kid'),
                                     inner_metadata.get('kid_cif'),
@@ -738,81 +719,90 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                                     inner_metadata.get('sign'),
                                 )
                                 if not firma:
-                                    message['error'] = firma_error
-                                    if 'json' in message:
-                                        del message['json']
-                                    message['is_json'] = False
+                                    mess['error'] = sign_error
+                                    if 'json' in mess:
+                                        del mess['json']
+                                    mess['is_json'] = False
                                     continue
 
-                                id_message_decifrato = inner_metadata.get('id')
+                                message_decrypted_id = inner_metadata.get('id')
                                 
                                 sign_inside = inner_metadata.get('sign')
                                 kid_inside = inner_metadata.get('kid')
                                 kid_cif_inside = inner_metadata.get('kid_cif')
 
-                                if id_message_decifrato_caption != id_message_decifrato or sign_inside != sign or kid_inside != kid or (kid_cif and kid_cif_inside != kid_cif):
-                                    message['error'] = "questo messaggio e' stato modificato"
-                                    if 'json' in message:
-                                        del message['json']
-                                    message['is_json'] = False
+                                if mess_decrypted_id_caption != message_decrypted_id or sign_inside != sign or kid_inside != kid or (kid_cif and kid_cif_inside != kid_cif):
+                                    mess['error'] = "questo messaggio e' stato modificato"
+                                    if 'json' in mess:
+                                        del mess['json']
+                                    mess['is_json'] = False
                                     continue
 
-                                message['text'] = message_bytes.decode('utf-8', errors='replace')
+                                mess['text'] = message_bytes.decode('utf-8', errors='replace')
 
-                                if 'json' in message:
-                                    del message['json']
-                                message['is_json'] = False
-                                message['secure'] = True
-                                message['file'] = False
-                                message.pop('media_type', None)
-                                message.pop('filename', None)
-                                message.pop('mime', None)
-                                message.pop('size', None)
-                                sender_key = str(message.get('sender_id')) if message.get('sender_id') is not None else "unknown"
+                                if 'json' in mess:
+                                    del mess['json']
+                                mess['is_json'] = False
+                                mess['secure'] = True
+                                mess['file'] = False
+                                mess.pop('media_type', None)
+                                mess.pop('filename', None)
+                                mess.pop('mime', None)
+                                mess.pop('size', None)
+                                sender_key = str(mess.get('sender_id')) if mess.get('sender_id') is not None else "unknown"
                                 seq_inner = inner_metadata.get('seq')
                                 if isinstance(seq_inner, int):
-                                    message['_secure_seq'] = seq_inner
-                                    message['_secure_sender_key'] = sender_key
-                                    update_max_seq_in_vault(message.get('sender_id'), seq_inner)
+                                    mess['_secure_seq'] = seq_inner
+                                    mess['_secure_sender_key'] = sender_key
+                                    update_max_seq_in_vault(mess.get('sender_id'), seq_inner)
                 except Exception:
-                    import traceback
-                    traceback.print_exc()
+                    raise HTTPException(status_code=500)
+
 
     await mark_replay_on_chunk_boundary(messages)
     mark_replay_in_history(messages)
-    for message in messages:
-        message.pop('_secure_seq', None)
-        message.pop('_secure_sender_key', None)
+    for mess in messages:
+        mess.pop('_secure_seq', None)
+        mess.pop('_secure_sender_key', None)
 
-    vault_cifrato = cifra_vault(chat_vault, data['data']['masterkey'])
-    try:
-        with db_lock, get_connection() as conn:
-            cursor = conn.cursor()
+    if seq_dirty:
+        try:
             if is_group_chat_id(chat_id):
-                if insert_new_vault:
-                    cursor.execute(
-                        """INSERT INTO contatti_gruppo (proprietario, gruppo_id, vault) VALUES (?, ?, ?)""",
-                        (username, chat_id_cif, vault_cifrato)
-                    )
-                else:
-                    cursor.execute(
-                        """UPDATE contatti_gruppo SET vault = ? WHERE proprietario = ? AND gruppo_id = ?""",
-                        (vault_cifrato, username, chat_id_cif)
-                    )
+                latest_insert_new_vault, latest_chat_vault = get_gruppo_vault(username, chat_id, entity, data)
+                latest_participants = latest_chat_vault.setdefault('partecipanti', {})
+                if not isinstance(latest_participants, dict):
+                    latest_participants = {}
+                    latest_chat_vault['partecipanti'] = latest_participants
+
+                local_participants = vault if isinstance(vault, dict) else {}
+                for sender_key, local_participant in local_participants.items():
+                    if not isinstance(local_participant, dict):
+                        continue
+                    local_seq = local_participant.get('seq')
+                    if not isinstance(local_seq, int):
+                        continue
+
+                    latest_participant = latest_participants.get(sender_key)
+                    if not isinstance(latest_participant, dict):
+                        latest_participant = {}
+                        latest_participants[sender_key] = latest_participant
+
+                    latest_seq = latest_participant.get('seq') if isinstance(latest_participant.get('seq'), int) else None
+                    if latest_seq is None or local_seq > latest_seq:
+                        latest_participant['seq'] = local_seq
             else:
-                if insert_new_vault:
-                    cursor.execute(
-                        """INSERT INTO contatti (proprietario, contatto_id, vault) VALUES (?, ?, ?)""",
-                        (username, chat_id_cif, vault_cifrato)
-                    )
-                else:
-                    cursor.execute(
-                        """UPDATE contatti SET vault = ? WHERE proprietario = ? AND contatto_id = ?""",
-                        (vault_cifrato, username, chat_id_cif)
-                    )
-            conn.commit()
-    except sqlite3.Error as error:
-        raise HTTPException(status_code=500, detail=str(error))
+                latest_insert_new_vault, latest_chat_vault = await get_chat_vault(username, chat_id, client, data)
+                local_seq = vault.get('seq') if isinstance(vault, dict) else None
+                if isinstance(local_seq, int):
+                    latest_seq = latest_chat_vault.get('seq') if isinstance(latest_chat_vault.get('seq'), int) else None
+                    if latest_seq is None or local_seq > latest_seq:
+                        latest_chat_vault['seq'] = local_seq
+
+
+            chats_vault_update(latest_chat_vault, data, username, chat_id, latest_insert_new_vault )
+            
+        except sqlite3.Error as error:
+            raise HTTPException(status_code=500, detail=str(error))
 
     messages.reverse() 
     return {"chat_id": chat_id, "messages": messages}
@@ -848,12 +838,12 @@ async def get_init_messages(chat_id: int, login_session: str = Cookie(None)):
             continue
 
         cif_flag = parsed.get('CIF') or parsed.get('cif')
-        pubblic = parsed.get('public')
+        public = parsed.get('public')
         kid = parsed.get('kid')
         kid_cif = parsed.get('kid_cif')
         pub_sign = parsed.get('pub_sign')
 
-        if cif_flag != "in" or not pubblic or not is_valid_age_public_key(pubblic):
+        if cif_flag != "in" or not public or not is_valid_age_public_key(public):
             continue
 
         found += 1
@@ -861,7 +851,7 @@ async def get_init_messages(chat_id: int, login_session: str = Cookie(None)):
             data,
             chat_id,
             msg.sender_id,
-            pubblic,
+            public,
             kid=kid,
             kid_cif=kid_cif,
             pub_sign=pub_sign,
@@ -932,9 +922,6 @@ async def download_media(chat_id: int, message_id: int, login_session: str = Coo
     except HTTPException:
         raise
     except Exception as e:
-        print(f"ERROR download_media: {e}")
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=502, detail=f"Errore download: {str(e)}")
     
 @router.get("/media/cifrato/download/{chat_id}/{message_id}")
@@ -1001,7 +988,7 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
             raise HTTPException(status_code=400, detail="Header metadata non valido")
 
         header_encrypted_metadata = encrypted_payload_bytes[8:8 + header_encrypted_size]
-        decrypted_metadata_bytes = decifra_file_con_age(header_encrypted_metadata, candidate_privates)
+        decrypted_metadata_bytes = decrypt_file_with_age(header_encrypted_metadata, candidate_privates)
         if not decrypted_metadata_bytes:
             raise HTTPException(status_code=400, detail="Impossibile decifrare i metadata")
 
@@ -1018,7 +1005,7 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
             raise HTTPException(status_code=400, detail="Metadata esterni non cifrati")
 
         encrypted_body = encrypted_payload_bytes[8 + header_encrypted_size:]
-        decrypted_payload = decifra_file_con_age(encrypted_body, candidate_privates)
+        decrypted_payload = decrypt_file_with_age(encrypted_body, candidate_privates)
         if not decrypted_payload:
             raise HTTPException(status_code=400, detail="Impossibile decifrare il file")
 
@@ -1052,9 +1039,5 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
                 'Cache-Control': 'no-store'
             }
         )
-    except HTTPException:
-        raise
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=502, detail=f"Errore download: {str(e)}")

@@ -1,90 +1,80 @@
 <script>
-    import api from '@/services/api'
-     export default {
-        data: function() {
-            return {
-                errormsg: null,
-                loading: false,
-                some_data: null,
+import api from '@/services/api'
 
-                sms: '',
-                expired: 0,
-                username: '',
-                password: '',
-                pass: '',
-            }
-        },
-        methods: {
-            async login(){
-                this.errormsg = null
-                this.loading = true
-                let response
-                try {
-                    response = await api.post('/login', {
-                        username: this.username,
-                        password: this.password,
-                    }, { withCredentials: true })
-                    console.log('Signup OK:', response.data)
-                } catch (e) {
-                    this.errormsg = e.response?.data?.message || e.message
-                } finally {
-                    this.loading = false
-                    console.log('Response status:', response?.data?.status)
-                    if (response?.data?.status == "logged in"){
-                        this.$router.push('/home')
-                    }
-                    else if(response?.data?.status == "session expired"){
-                        this.expired = 1
-                    }
-                }
-            },
-            async login_expired(){
-                this.errormsg = null
-                this.loading = true
-                let response
-                try {
-                    response = await api.post('/login/expired', {
-                        sms: this.sms,
-                        password: this.pass
-                    }, { withCredentials: true })
-                    console.log('Signup OK:', response.data)
-                } catch (e) {
-                    this.errormsg = e.response?.data?.message || e.message
-                } finally {
-                    this.loading = false
-                    this.sms = ''
-                    this.pass = ''
-                    console.log('Response status:', response?.data?.status)
-                    if (response?.data?.status == "logged in"){
-                        this.$router.push('/home')
-                    }
-                    else{
-                        this.expired = 0
-                    }
+export default {
+    data: function() {
+        return {
+            errormsg: null,
+            loading: false,
+            sms: '',
+            expired: 0,
+            username: '',
+            password: '',
+            pass: '',
+        }
+    },
+    methods: {
+        async login() {
+            this.errormsg = null
+            this.loading = true
+            let response
+            try {
+                response = await api.post('/login', {
+                    username: this.username,
+                    password: this.password,
+                }, { withCredentials: true })
+            } catch (e) {
+                this.errormsg = e.response?.data?.message || e.message
+            } finally {
+                this.loading = false
+                if (response?.data?.status === 'logged in') {
+                    this.$router.push('/home')
+                } else if (response?.data?.status === 'session expired') {
+                    this.expired = 1
                 }
             }
         },
-        mounted() {
-            // this.refresh()
-	    }
-    }
+        async loginExpired() {
+            this.errormsg = null
+            this.loading = true
+            let response
+            try {
+                response = await api.post('/login/expired', {
+                    sms: this.sms,
+                    password: this.pass
+                }, { withCredentials: true })
+            } catch (e) {
+                this.errormsg = e.response?.data?.message || e.message
+            } finally {
+                this.loading = false
+                this.sms = ''
+                this.pass = ''
+                if (response?.data?.status === 'logged in') {
+                    this.$router.push('/home')
+                } else {
+                    this.expired = 0
+                }
+            }
+        }
+    },
+}
 </script>
 <template>
     <div class="login-page">
         <div class="login-card">
-            <form v-if="expired == 0" @submit.prevent="login()">
+            <form v-if="expired === 0" @submit.prevent="login()">
                 <div>
                     <div class="mb-3">
-                        <label for="exampleInputEmail1" class="form-label">Username</label>
-                        <input type="text" class="form-control" id="exampleInputEmail1" aria-describedby="emailHelp" v-model="username">
+                        <label for="loginUsername" class="form-label">Username</label>
+                        <input type="text" class="form-control" id="loginUsername" v-model="username" autocomplete="username">
                     </div>
                     <div class="mb-3">
-                        <label for="exampleInputPassword1" class="form-label">Password</label>
-                        <input type="password" class="form-control" id="exampleInputPassword1" v-model="password">
+                        <label for="loginPassword" class="form-label">Password</label>
+                        <input type="password" class="form-control" id="loginPassword" v-model="password" autocomplete="current-password">
                     </div>
                 </div>
 
-                <button type="submit" class="btn btn-primary w-100">{{loading ? 'attendi...' : 'submit' }}</button>
+                <button type="submit" class="btn btn-primary w-100">{{ loading ? 'Accesso in corso...' : 'Accedi' }}</button>
                 <div>
                     <p class="mt-3 text-center">
                         Non hai un account?
@@ -93,16 +83,16 @@
                 </div>
             </form>
 
-            <form v-else @submit.prevent="login_expired()">
+            <form v-else @submit.prevent="loginExpired()">
                 <div>
                     <div class="mb-3">
-                        <label for="exampleInputEmail1" class="form-label">SMS</label>
-                        <input type="text" class="form-control" id="exampleInputEmail1" aria-describedby="emailHelp" v-model="sms">
+                        <label for="loginSms" class="form-label">Codice SMS</label>
+                        <input type="text" class="form-control" id="loginSms" v-model="sms" inputmode="numeric" autocomplete="one-time-code">
 
-                        <label for="exampleInputEmail1" class="form-label">Password di Telegram</label>
-                        <input type="password" class="form-control" id="exampleInputEmail1" aria-describedby="emailHelp" v-model="pass">
+                        <label for="loginTelegramPassword" class="form-label mt-2">Password Telegram</label>
+                        <input type="password" class="form-control" id="loginTelegramPassword" v-model="pass" autocomplete="current-password">
                     </div>
-                    <button type="submit" class="btn btn-primary w-100">{{loading ? 'attendi...' : 'submit' }}</button>
+                    <button type="submit" class="btn btn-primary w-100">{{ loading ? 'Verifica in corso...' : 'Conferma' }}</button>
                 </div>
             </form>
             <p v-if="errormsg" class="text-danger mt-3 mb-0">{{ errormsg }}</p>
