@@ -4,9 +4,9 @@ from telethon import events, utils
 from telethon.tl.types import PeerChannel, UpdateDeleteChannelMessages, UpdateDeleteMessages
 from config import pepper
 from database.sqlite import get_connection, db_lock
-from cryptography_ import decrypt_vault, decrypt_vault, verify_message_sign, calculate_message_sign, encrypt_vault
+from cryptography_ import decrypt_with_age, decrypt_vault, decrypt_vault, verify_message_sign, calculate_message_sign, encrypt_vault
 from databaseInteractions import store_public_key_in_vault
-from utils import  login_cache, is_valid_age_public_key, set_media, is_logged_in, build_candidate_privates
+from utils import  login_cache, is_valid_age_public_key, set_media, is_logged_in, build_candidate_privates, build_candidate_privates_test
 
 _active_connections = {}
 _connections_lock = asyncio.Lock()
@@ -76,16 +76,6 @@ def _verify_signed_payload(
     payload_cif,
     payload_sign,
 ) -> tuple[bool, str]:
-    if not isinstance(payload_id, str) or not payload_id.strip():
-        return False, "questo messaggio e' stato modificato"
-    if not isinstance(payload_kid, str) or not payload_kid.strip():
-        return False, "chiave di firma mittente non disponibile"
-    if not isinstance(payload_kid_cif, str) or not payload_kid_cif.strip():
-        return False, "chiave di cifratura mittente non disponibile"
-    if not isinstance(payload_sign, str) or not payload_sign.strip():
-        return False, "questo messaggio e' stato modificato"
-    if not isinstance(payload_cif, str) or not payload_cif.strip():
-        return False, "questo messaggio e' stato modificato"
 
     if my_id and sender_id == my_id:
         local_kid_map = user_data.get('data', {}).get('chats', {}).get(chat_id_cif, {}).get('kid', {})
@@ -375,7 +365,6 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
             return
         if event.message and event.message.id:
             await index_messages(temp_id, event.chat_id, [event.message.id])
-        # Process encrypted payloads for both incoming and own messages coming from other devices.
         if event.message:
             
             
@@ -438,6 +427,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                     kid = mess_data['json'].get('kid')
                     kid_cif = mess_data['json'].get('kid_cif')
                     sign = mess_data['json'].get('sign')
+                    kids = mess_data['json'].get('kids')
 
                     valid_sign, sign_error = _verify_signed_payload(
                         data,
@@ -468,36 +458,10 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
 
                     chats_data = data['data'].get('chats', {})
                     chat_keys = chats_data.get(chat_id_cif, {})
-                    candidate_privates = build_candidate_privates(chat_keys, kid_cif=kid_cif)
+                    private = build_candidate_privates_test(chat_keys, kids, kid_cif=kid_cif)
 
-                    decr_text = None
-                    
-
-                    for privata in candidate_privates:
-                        try:
-                            
-                            try:
-                                text_bytes = base64.b64decode(text)
-                            except:
-                                text_bytes = text.encode()
-                            
-                            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
-                                keyfile.write(privata)
-                                keyfile_path = keyfile.name
-                            try:
-                                result = subprocess.run(
-                                    ['age', '-d', '-i', keyfile_path],
-                                    input=text_bytes,
-                                    capture_output=True,
-                                    check=True
-                                )
-                                decr_text = result.stdout.decode()
-                                break
-                            finally:
-                                os.unlink(keyfile_path)
-                        except Exception:
-                            
-                            continue                    
+                    decr_text = decrypt_with_age(text, private)
+                                            
                     if decr_text:
                         try:
                             mess_dic = json.loads(decr_text)
@@ -738,11 +702,91 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
 
         
                 if cif_flag == "file":
-                    id_message = mess_data['json'].get('id')
-                    seq = mess_data['json'].get('seq')
-                    kid = mess_data['json'].get('kid')
-                    kid_cif = mess_data['json'].get('kid_cif')
-                    sign = mess_data['json'].get('sign')
+                    mess_id = mess_data.get('id')
+                    if mess_id:
+                        full_message = await client.get_messages(entity, ids=mess_id)
+                        if full_message and full_message.media:
+                            file_bytes = io.BytesIO()
+                            # 64 KB di solito sono più che sufficienti per scaricare gli header (metadata + metadata cifrato)
+                            max_bytes = 64 * 1024
+                            downloaded = 0
+                            async for chunk in client.iter_download(full_message, offset=0, limit=max_bytes):
+                                if not chunk:
+                                    break
+                                file_bytes.write(chunk)
+                                downloaded += len(chunk)
+                                if downloaded >= max_bytes:
+                                    break
+                            
+                            file_bytes.seek(0)
+                            file_head_bytes = file_bytes.getvalue()
+                            
+                            mess_data['file_head'] = base64.b64encode(file_head_bytes).decode()
+                            mess_data['file_head_size'] = len(file_head_bytes)
+
+                            # --- INIZIO NUOVA LOGICA DI ESTRAZIONE ---
+                            
+                            metadata_plain = None            # Conterrà la stringa JSON non cifrata (o il dict)
+                            header_encrypted_metadata = None # Conterrà i byte cifrati con age
+                            
+                            offset = 0
+                            
+                            # 1. Leggo la lunghezza del metadata_plain (4 bytes)
+                            if len(file_head_bytes) >= offset + 4:
+                                metadata_size = int.from_bytes(file_head_bytes[offset : offset + 4], byteorder='big')
+                                offset += 4
+                                
+                                # 2. Leggo il metadata in chiaro
+                                if 0 < metadata_size <= len(file_head_bytes) - offset:
+                                    metadata_bytes = file_head_bytes[offset : offset + metadata_size]
+                                    offset += metadata_size
+                                    
+                                    # Decodifico i byte in stringa e poi (opzionale) in un dizionario Python
+                                    try:
+                                        metadata_plain_str = metadata_bytes.decode('utf-8')
+                                        metadata_plain = json.loads(metadata_plain_str) # Ora hai un dict usabile!
+                                    except Exception as e:
+                                        print(f"Errore nel parsing del metadata_plain: {e}")
+                                    
+                                    # 3. Leggo la lunghezza del metadata cifrato (4 bytes)
+                                    if len(file_head_bytes) >= offset + 4:
+                                        encrypted_metadata_size = int.from_bytes(file_head_bytes[offset : offset + 4], byteorder='big')
+                                        offset += 4
+                                        
+                                        # 4. Leggo il metadata cifrato
+                                        if 0 < encrypted_metadata_size <= len(file_head_bytes) - offset:
+                                            # estraggo i byte (sono già base64-encoded nel payload)
+                                            raw_header = file_head_bytes[offset : offset + encrypted_metadata_size]
+                                            offset += encrypted_metadata_size
+                                            # Conserva una stringa base64 per poterla serializzare in JSON
+                                            try:
+                                                header_encrypted_metadata = raw_header.decode('utf-8')
+                                            except Exception:
+                                                try:
+                                                    header_encrypted_metadata = base64.b64encode(raw_header).decode('utf-8')
+                                                except Exception:
+                                                    header_encrypted_metadata = None
+                                            
+                                            # (Facoltativo) Da questo 'offset' in poi inizia 'encrypted_file'
+
+                            # Assegno i valori estratti al messaggio per usarli dopo
+                            mess_data['metadata_plain'] = metadata_plain
+                            mess_data['encrypted_metadata'] = header_encrypted_metadata
+                            # Debug: mostra informazioni utili per capire problemi di decifratura
+                            try:
+                                print(f"[debug:file] file_head_size={len(file_head_bytes)} metadata_plain_present={metadata_plain is not None} encrypted_metadata_present={header_encrypted_metadata is not None}")
+                            except Exception:
+                                pass
+
+
+
+
+                    id_message = mess_data.get('metadata_plain', {}).get('id')
+                    seq = mess_data.get('metadata_plain', {}).get('seq')
+                    kid = mess_data.get('metadata_plain', {}).get('kid')
+                    kid_cif = mess_data.get('metadata_plain', {}).get('kid_cif')
+                    sign = mess_data.get('metadata_plain', {}).get('sign')
+                    kids = mess_data.get('metadata_plain', {}).get('kids')
 
                     valid_sign, sign_error = _verify_signed_payload(
                         data,
@@ -770,31 +814,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                         await broadcast_event(temp_id, event.chat_id, payload)
                         return
 
-                    mess_id = mess_data.get('id')
-                    if mess_id:
-                        full_mess = await client.get_messages(entity, ids=mess_id)
-                        if full_mess and full_mess.media:
-                            file_bytes = io.BytesIO()
-                            max_bytes = 64 * 1024
-                            downloaded = 0
-                            async for chunk in client.iter_download(full_mess, offset=0, limit=max_bytes):
-                                if not chunk:
-                                    break
-                                file_bytes.write(chunk)
-                                downloaded += len(chunk)
-                                if downloaded >= max_bytes:
-                                    break
-                            file_bytes.seek(0)
-                            file_head_bytes = file_bytes.getvalue()
-                            mess_data['file_head'] = base64.b64encode(file_head_bytes).decode()
-                            mess_data['file_head_size'] = len(file_head_bytes)
-
-                            header_encrypted_metadata = None
-                            if len(file_head_bytes) >= 8:
-                                header_metadata_size = int.from_bytes(file_head_bytes[:4], byteorder='big')
-                                header_encrypted_size = int.from_bytes(file_head_bytes[4:8], byteorder='big')
-                                if 0 < header_encrypted_size <= len(file_head_bytes) - 8:
-                                    header_encrypted_metadata = file_head_bytes[8:8 + header_encrypted_size]
+                    
         
                     chats_data = data['data'].get('chats', {})
                     chat_keys = chats_data.get(chat_id_cif, {})
@@ -802,13 +822,21 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
 
                     decr_text = None
                     if header_encrypted_metadata:
-                        for privata in candidate_privates:
+                        # prova ogni chiave privata candidata e logga gli errori di age
+                        try:
+                            encoded = header_encrypted_metadata
+                            input_bytes = None
                             try:
-                                try:
-                                    input_bytes = base64.b64decode(header_encrypted_metadata)
-                                except Exception:
-                                    input_bytes = header_encrypted_metadata
-                                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
+                                input_bytes = base64.b64decode(encoded)
+                            except Exception:
+                                input_bytes = encoded if isinstance(encoded, (bytes, bytearray)) else encoded.encode('utf-8')
+                        except Exception:
+                            input_bytes = None
+
+                        print(f"[debug:file] trying to decrypt header with {len(candidate_privates)} candidate private keys")
+                        for idx, privata in enumerate(candidate_privates):
+                            try:
+                                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as keyfile:
                                     keyfile.write(privata)
                                     keyfile_path = keyfile.name
                                 try:
@@ -818,11 +846,27 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                         capture_output=True,
                                         check=True
                                     )
-                                    decr_text = result.stdout.decode()
+                                    # successo
+                                    try:
+                                        decr_text = result.stdout.decode('utf-8')
+                                    except Exception:
+                                        decr_text = result.stdout.decode(errors='ignore')
+                                    print(f"[debug:file] decryption succeeded with candidate #{idx}")
                                     break
+                                except subprocess.CalledProcessError as e:
+                                    stderr = None
+                                    try:
+                                        stderr = e.stderr.decode('utf-8', errors='ignore')
+                                    except Exception:
+                                        stderr = str(e)
+                                    print(f"[debug:file] age failed for candidate #{idx}: returncode={e.returncode} stderr={stderr}")
                                 finally:
-                                    os.unlink(keyfile_path)
-                            except Exception:
+                                    try:
+                                        os.unlink(keyfile_path)
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                print(f"[debug:file] unexpected error trying candidate #{idx}: {e}")
                                 continue
 
                     if decr_text:

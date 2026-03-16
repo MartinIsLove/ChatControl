@@ -3,7 +3,7 @@ import sqlite3, hashlib, json, base64, subprocess, tempfile, io, os, mimetypes
 from database.sqlite import get_connection, db_lock
 from config import pepper
 from databaseInteractions import store_public_key_in_vault, get_gruppo_vault, get_chat_vault, chats_vault_update
-from cryptography_ import decrypt_file_with_age, verify_message_sign, calculate_message_sign, encrypt_vault
+from cryptography_ import decrypt_file_with_age, verify_message_sign, calculate_message_sign, encrypt_vault, decrypt_with_age
 from utils import is_logged_in, is_valid_age_public_key, is_group_chat_id, build_candidate_privates, build_candidate_privates_test, set_media
 from realtime import connect_socket, disconnect_socket, register_telethon_handlers, index_messages
 from telethon.tl.types import MessageService, MessageActionChatCreate, MessageActionChatDeleteUser, MessageActionChatAddUser, MessageActionPinMessage
@@ -448,34 +448,9 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                 chats_data = data['data'].get('chats', {})
                 chat_keys = chats_data.get(chat_id_cif, {})
                 private = build_candidate_privates_test(chat_keys, kids, kid_cif=kid_cif)
-                decrypted_text = None
                 
-
+                decrypted_text = decrypt_with_age(text, private)
                 
-                try:
-                    
-                    try:
-                        text_bytes = base64.b64decode(text)
-                    except:
-                        text_bytes = text.encode()
-                    
-                    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
-                        keyfile.write(private)
-                        keyfile_path = keyfile.name
-                    try:
-                        result = subprocess.run(
-                            ['age', '-d', '-i', keyfile_path],
-                            input=text_bytes,
-                            capture_output=True,
-                            check=True
-                        )
-                        decrypted_text = result.stdout.decode()
-                        
-                    finally:
-                        os.unlink(keyfile_path)
-                except Exception as e:
-                    
-                    continue
                 if decrypted_text:
                     try:
                         dic_mes = json.loads(decrypted_text)
@@ -513,13 +488,75 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
 
 
             if cif_flag == "file":
-
                 mess_id = mess.get('id')
-                mess_decrypted_id_caption = mess['json'].get('id')
-                seq = mess['json'].get('seq')
-                kid = mess['json'].get('kid')
-                kid_cif = mess['json'].get('kid_cif')
-                sign = mess['json'].get('sign')
+                if mess_id:
+                    full_message = await client.get_messages(entity, ids=mess_id)
+                    if full_message and full_message.media:
+                        file_bytes = io.BytesIO()
+                        # 64 KB di solito sono più che sufficienti per scaricare gli header (metadata + metadata cifrato)
+                        max_bytes = 64 * 1024
+                        downloaded = 0
+                        async for chunk in client.iter_download(full_message, offset=0, limit=max_bytes):
+                            if not chunk:
+                                break
+                            file_bytes.write(chunk)
+                            downloaded += len(chunk)
+                            if downloaded >= max_bytes:
+                                break
+                        
+                        file_bytes.seek(0)
+                        file_head_bytes = file_bytes.getvalue()
+                        
+                        mess['file_head'] = base64.b64encode(file_head_bytes).decode()
+                        mess['file_head_size'] = len(file_head_bytes)
+
+                        # --- INIZIO NUOVA LOGICA DI ESTRAZIONE ---
+                        
+                        metadata_plain = None            # Conterrà la stringa JSON non cifrata (o il dict)
+                        header_encrypted_metadata = None # Conterrà i byte cifrati con age
+                        
+                        offset = 0
+                        
+                        # 1. Leggo la lunghezza del metadata_plain (4 bytes)
+                        if len(file_head_bytes) >= offset + 4:
+                            metadata_size = int.from_bytes(file_head_bytes[offset : offset + 4], byteorder='big')
+                            offset += 4
+                            
+                            # 2. Leggo il metadata in chiaro
+                            if 0 < metadata_size <= len(file_head_bytes) - offset:
+                                metadata_bytes = file_head_bytes[offset : offset + metadata_size]
+                                offset += metadata_size
+                                
+                                # Decodifico i byte in stringa e poi (opzionale) in un dizionario Python
+                                try:
+                                    metadata_plain_str = metadata_bytes.decode('utf-8')
+                                    metadata_plain = json.loads(metadata_plain_str) # Ora hai un dict usabile!
+                                except Exception as e:
+                                    print(f"Errore nel parsing del metadata_plain: {e}")
+                                
+                                # 3. Leggo la lunghezza del metadata cifrato (4 bytes)
+                                if len(file_head_bytes) >= offset + 4:
+                                    encrypted_metadata_size = int.from_bytes(file_head_bytes[offset : offset + 4], byteorder='big')
+                                    offset += 4
+                                    
+                                    # 4. Leggo il metadata cifrato
+                                    if 0 < encrypted_metadata_size <= len(file_head_bytes) - offset:
+                                        header_encrypted_metadata = file_head_bytes[offset : offset + encrypted_metadata_size]
+                                        offset += encrypted_metadata_size
+                                        
+                                        # (Facoltativo) Da questo 'offset' in poi inizia 'encrypted_file'
+
+                        # Assegno i valori estratti al messaggio per usarli dopo
+                        mess['metadata_plain'] = metadata_plain
+                        mess['encrypted_metadata'] = header_encrypted_metadata
+                mess_decrypted_id_caption = mess.get('metadata_plain', {}).get('id')
+                seq = mess.get('metadata_plain', {}).get('seq')
+                kid = mess.get('metadata_plain', {}).get('kid')
+                kid_cif = mess.get('metadata_plain', {}).get('kid_cif')
+                sign = mess.get('metadata_plain', {}).get('sign')
+                kids = mess.get('metadata_plain', {}).get('kids')
+
+                print(mess['metadata_plain'], " negro ", mess['encrypted_metadata'])
 
                 firma, sign_error = verify_signed_payload(
                     mess.get('sender_id'),
@@ -536,29 +573,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                         del mess['json']
                     mess['is_json'] = False
                     continue
-                if mess_id:
-                    full_message = await client.get_messages(entity, ids=mess_id)
-                    if full_message and full_message.media:
-                        file_bytes = io.BytesIO()
-                        max_bytes = 64 * 1024
-                        downloaded = 0
-                        async for chunk in client.iter_download(full_message, offset=0, limit=max_bytes):
-                            if not chunk:
-                                break
-                            file_bytes.write(chunk)
-                            downloaded += len(chunk)
-                            if downloaded >= max_bytes:
-                                break
-                        file_bytes.seek(0)
-                        file_head_bytes = file_bytes.getvalue()
-                        mess['file_head'] = base64.b64encode(file_head_bytes).decode()
-                        mess['file_head_size'] = len(file_head_bytes)
-
-                        header_encrypted_metadata = None
-                        if len(file_head_bytes) >= 8:
-                            header_encrypted_size = int.from_bytes(file_head_bytes[4:8], byteorder='big')
-                            if 0 < header_encrypted_size <= len(file_head_bytes) - 8:
-                                header_encrypted_metadata = file_head_bytes[8:8 + header_encrypted_size]
+                
     
 
                 chats_data = data['data'].get('chats', {})
@@ -589,7 +604,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                                 os.unlink(keyfile_path)
                         except Exception:
                             continue
-
+                print(decrypted_text)
                 if decrypted_text:
                     try:
                         dic_mes = json.loads(decrypted_text)

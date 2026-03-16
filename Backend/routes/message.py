@@ -201,6 +201,7 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
                 "kid_cif": kid_cif,
                 "seq": seq,
                 "sign": sign,
+                "kids": kids,
             }
 
             json_metadata = json.dumps(metadata, sort_keys=True)
@@ -211,32 +212,29 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
             if encrypted_metadata is None:
                 raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
 
-            body_plain = metadata_size.to_bytes(4, byteorder='big') + metadata_bytes + file_content
-            encrypted_body = encrypt_with_age(body_plain, recipient_keys)
-            if encrypted_body is None:
-                raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
+            # cifro solo il metadata separatamente (già fatto) e cifro solo il file
+            encrypted_file = encrypt_with_age(file_content, recipient_keys)
+            if encrypted_file is None:
+                raise HTTPException(status_code=500, detail="Errore durante la cifratura del file con age")
 
             if isinstance(encrypted_metadata, str):
                 encrypted_metadata = encrypted_metadata.encode('utf-8')
-            if isinstance(encrypted_body, str):
-                encrypted_body = encrypted_body.encode('utf-8')
+            if isinstance(encrypted_file, str):
+                encrypted_file = encrypted_file.encode('utf-8')
 
+            # payload: [len(metadata_plain:4)] [metadata_plain] [len(encrypted_metadata:4)] [encrypted_metadata] [encrypted_file]
             payload = (
                 metadata_size.to_bytes(4, byteorder='big')
+                + metadata_bytes
                 + len(encrypted_metadata).to_bytes(4, byteorder='big')
                 + encrypted_metadata
-                + encrypted_body
+                + encrypted_file
             )
 
             encrypted_payload = payload
-            
-            testo = {
+
+            caption = {
                 "cif":"file",
-                "seq": seq,
-                "kid": kid,
-                "kid_cif": kid_cif,
-                "sign": sign,
-                "id": id_mess
             }
 
             # Salva il file cifrato con nome = token
@@ -249,9 +247,9 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
             
             # Invia il file tramite Telethon
 
-            testo_str = json.dumps(testo)
+            caption_str = json.dumps(caption)
 
-            if len(testo_str) <= CAPTION_LIMIT:
+            if len(caption_str) <= CAPTION_LIMIT:
                 start_time = time.monotonic()
 
                 async def progress_cb(current, total):
@@ -264,7 +262,7 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
                     sent_msg = await client.send_file(
                         chat_id,
                         tmp_path,
-                        caption=testo_str,
+                        caption=caption_str,
                         force_document=True,
                         attributes=[DocumentAttributeFilename(nome_file)],
                         progress_callback=progress_cb
@@ -283,7 +281,7 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
             else:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"caption troppo lunga ({len(testo_str)}>{CAPTION_LIMIT})"
+                    detail=f"caption troppo lunga ({len(caption_str)}>{CAPTION_LIMIT})"
                 )
         except HTTPException:
             raise

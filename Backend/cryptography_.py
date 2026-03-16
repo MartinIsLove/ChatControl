@@ -185,6 +185,34 @@ def decrypt_file_with_age(ciphertext, candidate_privates):
             continue
     return None
 
+def decrypt_with_age(text, private):
+    try:
+                    
+        try:
+            text_bytes = base64.b64decode(text)
+        except:
+            text_bytes = text.encode()
+        
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
+            keyfile.write(private)
+            keyfile_path = keyfile.name
+        try:
+            result = subprocess.run(
+                ['age', '-d', '-i', keyfile_path],
+                input=text_bytes,
+                capture_output=True,
+                check=True
+            )
+            decrypted_text = result.stdout.decode()
+            
+        finally:
+            os.unlink(keyfile_path)
+           
+    except Exception:
+        
+        return None
+    
+    return decrypted_text
 def genera_chiavi():
     try:
         risultato = subprocess.run(['age-keygen'], capture_output=True, text=True, check=True)
