@@ -114,7 +114,7 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
                 shutil.copyfileobj(file.file, tmp)
                 tmp_path = tmp.name
 
-            await client.send_file(
+            sent_msg = await client.send_file(
                 chat_id,
                 tmp_path,
                 caption=text,
@@ -123,7 +123,13 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
             )
             os.remove(tmp_path)
 
-            return {"status":"ok"}
+            sent_id = None
+            try:
+                sent_id = getattr(sent_msg, 'id', None)
+            except Exception:
+                sent_id = None
+
+            return {"status": "ok", "message_id": sent_id}
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
 
@@ -140,10 +146,17 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
 
 
         if group:
-            recipient_keys = get_group_chyper_keys(data, chat_id)
+            keys = get_group_chyper_keys(data, chat_id)
         else:
-            recipient_keys = get_chat_chyper_keys(data, chat_id)
+            keys = get_chat_chyper_keys(data, chat_id)
         
+
+        kids = []
+        recipient_keys = []
+        for kid, value in keys.items():
+            if value is not None and kid is not None:
+                kids.append(kid)
+                recipient_keys.append(value)
         try:
             file_content = await file.read()
 
@@ -246,8 +259,9 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
                     if elapsed >= 1.0 and (current / max(elapsed, 0.001)) < MIN_UPLOAD_BPS:
                         raise Exception("Connessione troppo lenta")
 
+                sent_msg = None
                 try:
-                    await client.send_file(
+                    sent_msg = await client.send_file(
                         chat_id,
                         tmp_path,
                         caption=testo_str,
@@ -259,7 +273,13 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
 
-                return {"status": "ok"}
+                sent_id = None
+                try:
+                    sent_id = getattr(sent_msg, 'id', None)
+                except Exception:
+                    sent_id = None
+
+                return {"status": "ok", "message_id": sent_id}
             else:
                 raise HTTPException(
                     status_code=413,
@@ -299,13 +319,21 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
         
         if credentials.group:
             
-            recipient_keys = get_group_chyper_keys(data, credentials.chat_id)
+            keys = get_group_chyper_keys(data, credentials.chat_id)
 
             
         else:
             
-            recipient_keys = get_chat_chyper_keys(data, credentials.chat_id)
+            keys = get_chat_chyper_keys(data, credentials.chat_id)
         
+        kids = []
+        recipient_keys = []
+        for kid, value in keys.items():
+            if value is not None and kid is not None:
+                recipient_keys.append(value)
+                kids.append(kid)
+
+
         chat_entry = data.get('data', {}).get('chats', {}).get(chat_id_hash, {})
         kid = chat_entry.get('kid_corrente')
         kid_cif = chat_entry.get('kid_cif_corrente')
@@ -343,23 +371,36 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
             "sign": sign
         }
 
-        json_da_cifrare = json.dumps(da_cifrare, sort_keys= True)
+        
 
+        json_da_cifrare = json.dumps(da_cifrare, sort_keys= True)
         text_cyp = encrypt_with_age(json_da_cifrare, recipient_keys)
         
+        finale = {
+            "cif" : "on",
+            "text" : text_cyp,
+            "id" : id_messagge,
+            "kid": kid,
+            "kids": kids,
+            "kid_cif": kid_cif,
+            "seq": seq,
+            "sign": sign
+        }
+
         if text_cyp is None:
             raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
         
         #questa parte controlla che il messaggio sia entro i limiti di splittamento di telegram
         #ovvero 4096 caratteri, nel caso positivo gestisce l'invio del messaggio come file,
         #per evitare splittamenti
-        if len(text_cyp) > MESSAGE_LIMIT:
+        if len(finale) > MESSAGE_LIMIT:
             sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_messagge, "message")
             token = secrets.token_hex(8)
             nome_file = token + ".dat"
             message_bytes = credentials.text.encode("utf-8")
             message_metadata = {
                 "cif": "message",
+                "kids": kids,
                 "id":id_messagge,
                 "kid": kid,
                 "kid_cif": kid_cif,
@@ -402,15 +443,7 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
             except Exception as e:
                 raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
             
-        finale = {
-            "cif" : "on",
-            "text" : text_cyp,
-            "id" : id_messagge,
-            "kid": kid,
-            "kid_cif": kid_cif,
-            "seq": seq,
-            "sign": sign
-        }
+        
         
         try:
             await client.send_message(credentials.chat_id, json.dumps(finale))

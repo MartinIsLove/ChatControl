@@ -136,7 +136,7 @@ def store_public_key_in_vault(
     group_title: str | None = None,
     sender_username: str | None = None,
 ):
-    if not user_data or not public_key:
+    if not user_data or not public_key or str(user_data['data'].get('user_id')) == str(sender_id):
         return False
 
     if is_group is None:
@@ -202,15 +202,21 @@ def store_public_key_in_vault(
         participant_data= participants.get(sender_id_str)
 
         participant_data.setdefault('chiavi_cif',{})
-        participant_data['chiavi_cif'][kid_cif] = public_key
+        
+        if kid_cif not in participant_data['chiavi_cif']:
+            participant_data['chiavi_cif'][kid_cif] = public_key
 
         participant_data.setdefault('kid_cif_corrente',{})
+    
         participant_data['kid_cif_corrente']= kid_cif
 
         participant_data.setdefault('chiavi_firma',{})
-        participant_data['chiavi_firma'][kid]= pub_sign
+        
+        if kid not in participant_data['chiavi_firma']:
+            participant_data['chiavi_firma'][kid]= pub_sign
 
         participant_data.setdefault('kid_corrente',{})
+        
         participant_data['kid_corrente']= kid
 
         participants[sender_id_str] = participant_data
@@ -218,15 +224,20 @@ def store_public_key_in_vault(
         participant_data = vault_deciphered
 
         participant_data.setdefault('chiavi_cif',{})
-        participant_data['chiavi_cif'][kid_cif] = public_key
+        
+        if kid_cif not in participant_data['chiavi_cif']:
+            participant_data['chiavi_cif'][kid_cif] = public_key    
 
         participant_data.setdefault('kid_cif_corrente',{})
         participant_data['kid_cif_corrente']= kid_cif
 
         participant_data.setdefault('chiavi_firma',{})
-        participant_data['chiavi_firma'][kid]= pub_sign
+        
+        if kid not in participant_data['chiavi_firma']:
+            participant_data['chiavi_firma'][kid]= pub_sign
 
         participant_data.setdefault('kid_corrente',{})
+        
         participant_data['kid_corrente']= kid
 
         
@@ -284,14 +295,14 @@ def get_group_chyper_keys(data, chat_id1):
     except sqlite3.Error as error:
         raise HTTPException(status_code=500, detail=str(error))
 
-    recipient_keys = []
+    recipient_keys = {}
     if risultato and risultato[0]:
         vault_deciphered = decrypt_vault(risultato[0], data['data']['masterkey'])
         if 'partecipanti' in vault_deciphered:
             for participant_data in vault_deciphered['partecipanti'].values():
                 current_kid_cif = participant_data.get('kid_cif_corrente')
                 cif_map = participant_data.get('chiavi_cif', {}).get(current_kid_cif)                
-                recipient_keys.append(cif_map)
+                recipient_keys[current_kid_cif] = cif_map
 
     if 'chats' in data['data'] and chat_id in data['data']['chats']:
         chat_data = data['data']['chats'][chat_id]
@@ -304,7 +315,7 @@ def get_group_chyper_keys(data, chat_id1):
         user_public = selected.get('pubblica')
 
         if user_public and user_public not in recipient_keys:
-            recipient_keys.append(user_public)
+            recipient_keys[current_kid_cif] = user_public
                 
     if not recipient_keys:
         raise HTTPException(status_code=400, detail="Nessuna chiave disponibile per cifrare")
@@ -326,13 +337,13 @@ def get_chat_chyper_keys(data, chat_id1):
     except sqlite3.Error as error:
         raise HTTPException(status_code=500, detail=str(error))
 
-    recipient_keys = []
+    recipient_keys = {}
     if result and result[0]:
         vault_deciphered = decrypt_vault(result[0], data['data']['masterkey'])
         cif_map = vault_deciphered.get('chiavi_cif', {})
         current_kid_cif = vault_deciphered.get('kid_cif_corrente')
         cif_map = vault_deciphered.get('chiavi_cif', {}).get(current_kid_cif)                
-        recipient_keys.append(cif_map)
+        recipient_keys[current_kid_cif] = cif_map 
 
     if 'chats' in data['data'] and chat_id in data['data']['chats']:
         chat_data = data['data']['chats'][chat_id]
@@ -345,7 +356,7 @@ def get_chat_chyper_keys(data, chat_id1):
         user_public = selected.get('pubblica')
 
         if user_public and user_public not in recipient_keys:
-            recipient_keys.append(user_public)
+            recipient_keys[current_kid_cif] = user_public
     
     if not recipient_keys:
         raise HTTPException(status_code=400, detail="Nessuna chiave disponibile per cifrare")

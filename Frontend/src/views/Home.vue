@@ -86,6 +86,13 @@
               const current = this.messaggi[idx]
               this.messaggi.splice(idx, 1, { ...current, pending: false })
             },
+            replaceOptimisticId(tempId, realId) {
+              if (!tempId) return
+              const idx = this.messaggi.findIndex((m) => m.id === tempId)
+              if (idx === -1) return
+              const current = this.messaggi[idx]
+              this.messaggi.splice(idx, 1, { ...current, id: realId, pending: false })
+            },
             failOptimisticMessage(tempId, detail) {
               if (!tempId) return
               const idx = this.messaggi.findIndex((m) => m.id === tempId)
@@ -540,8 +547,9 @@
                   formData.append('chat_id',this.selectedChat.id)
                   formData.append('cryph',false)
                   formData.append('group',this.selectedChat.is_group)
-                  await api.post('/messages/send/file', formData,
+                  const resp = await api.post('/messages/send/file', formData,
                    { withCredentials: true })
+                  if (resp?.data?.message_id) this.replaceOptimisticId(optimisticId, resp.data.message_id)
                   
                 }
                 else if(outgoingFile && !outgoingText){
@@ -552,8 +560,9 @@
                   formData.append('cryph',false)
                   formData.append('group',this.selectedChat.is_group)
 
-                  await api.post('/messages/send/file', formData,
+                  const resp = await api.post('/messages/send/file', formData,
                    { withCredentials: true })
+                  if (resp?.data?.message_id) this.replaceOptimisticId(optimisticId, resp.data.message_id)
                 }
                 else if(outgoingText.trim().length !== 0){
                   await api.post('/messages/send', {
@@ -639,9 +648,10 @@
                   formData.append('cryph',true)
                   formData.append('group',this.selectedChat.is_group)
                   try{
-                    await api.post('/messages/send/file', formData,
+                    const resp = await api.post('/messages/send/file', formData,
                     { withCredentials: true })
-                    this.resolveOptimisticMessage(optimisticId)
+                    if (resp?.data?.message_id) this.replaceOptimisticId(optimisticId, resp.data.message_id)
+                    else this.resolveOptimisticMessage(optimisticId)
                   }
                   catch(e){
                     this.errormsg = e.response?.data?.message || e.message
@@ -665,9 +675,10 @@
                   formData.append('cryph',true)
                   formData.append('group',this.selectedChat.is_group)
                   try{
-                    await api.post('/messages/send/file', formData,
+                    const resp = await api.post('/messages/send/file', formData,
                     { withCredentials: true })
-                    this.resolveOptimisticMessage(optimisticId)
+                    if (resp?.data?.message_id) this.replaceOptimisticId(optimisticId, resp.data.message_id)
+                    else this.resolveOptimisticMessage(optimisticId)
                   }
                   catch(e){
                     this.errormsg = e.response?.data?.message || e.message

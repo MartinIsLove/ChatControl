@@ -4,7 +4,7 @@ from database.sqlite import get_connection, db_lock
 from config import pepper
 from databaseInteractions import store_public_key_in_vault, get_gruppo_vault, get_chat_vault, chats_vault_update
 from cryptography_ import decrypt_file_with_age, verify_message_sign, calculate_message_sign, encrypt_vault
-from utils import is_logged_in, is_valid_age_public_key, is_group_chat_id, build_candidate_privates, set_media
+from utils import is_logged_in, is_valid_age_public_key, is_group_chat_id, build_candidate_privates, build_candidate_privates_test, set_media
 from realtime import connect_socket, disconnect_socket, register_telethon_handlers, index_messages
 from telethon.tl.types import MessageService, MessageActionChatCreate, MessageActionChatDeleteUser, MessageActionChatAddUser, MessageActionPinMessage
 from datetime import datetime
@@ -427,7 +427,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                 kid = mess['json'].get('kid')
                 kid_cif = mess['json'].get('kid_cif') or mess['json'].get('kid_age')
                 sign = mess['json'].get('sign')
-                
+                kids = mess['json'].get('kids')
                 
                 firma, sign_error = verify_signed_payload(
                     mess.get('sender_id'),
@@ -447,36 +447,35 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                 
                 chats_data = data['data'].get('chats', {})
                 chat_keys = chats_data.get(chat_id_cif, {})
-                candidate_privates = build_candidate_privates(chat_keys, kid_cif=kid_cif)
-
+                private = build_candidate_privates_test(chat_keys, kids, kid_cif=kid_cif)
                 decrypted_text = None
                 
 
-                for private in candidate_privates:
+                
+                try:
+                    
                     try:
+                        text_bytes = base64.b64decode(text)
+                    except:
+                        text_bytes = text.encode()
+                    
+                    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
+                        keyfile.write(private)
+                        keyfile_path = keyfile.name
+                    try:
+                        result = subprocess.run(
+                            ['age', '-d', '-i', keyfile_path],
+                            input=text_bytes,
+                            capture_output=True,
+                            check=True
+                        )
+                        decrypted_text = result.stdout.decode()
                         
-                        try:
-                            text_bytes = base64.b64decode(text)
-                        except:
-                            text_bytes = text.encode()
-                        
-                        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
-                            keyfile.write(private)
-                            keyfile_path = keyfile.name
-                        try:
-                            result = subprocess.run(
-                                ['age', '-d', '-i', keyfile_path],
-                                input=text_bytes,
-                                capture_output=True,
-                                check=True
-                            )
-                            decrypted_text = result.stdout.decode()
-                            break
-                        finally:
-                            os.unlink(keyfile_path)
-                    except Exception as e:
-                        
-                        continue
+                    finally:
+                        os.unlink(keyfile_path)
+                except Exception as e:
+                    
+                    continue
                 if decrypted_text:
                     try:
                         dic_mes = json.loads(decrypted_text)

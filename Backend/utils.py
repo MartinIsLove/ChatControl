@@ -50,6 +50,25 @@ def is_valid_age_public_key(key: str):
         return True
     return False
 
+
+
+
+
+def build_candidate_privates_test(chat_keys: dict, kids, kid_cif: str | None = None):
+    
+    age_key_map = chat_keys.get('chiavi_cif', {})
+    selected_kid = list(set(kids) & age_key_map.keys() )
+    selected_key = ''
+    for kid_ in selected_kid:
+
+        selected_key = age_key_map.get(kid_).get('privata')
+
+    return selected_key
+
+
+
+
+
 def build_candidate_privates(chat_keys: dict, kid_cif: str | None = None):
     if not isinstance(chat_keys, dict):
         return []
@@ -72,8 +91,8 @@ def build_candidate_privates(chat_keys: dict, kid_cif: str | None = None):
     current_kid_cif = chat_keys.get('kid_cif_corrente')
 
     selected_key = age_key_map.get(current_kid_cif)
-    
-    _append_private(selected_key.get('privata'))
+    if selected_key is not None:
+        _append_private(selected_key.get('privata'))
 
     for _, key_data in sorted(
         age_key_map.items(),

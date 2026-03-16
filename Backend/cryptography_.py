@@ -57,19 +57,6 @@ def derive_signing_keys_from_age_private(age_private_key: str) -> dict[str, str]
 
 def calculate_message_sign(private_key_b64url: str, seq: int, kid: str, kid_cif: str, message_id: str, cif: str) -> str:
    
-    if not isinstance(private_key_b64url, str) or not private_key_b64url.strip():
-        raise ValueError("Chiave privata di firma mancante")
-    if not isinstance(seq, int):
-        raise ValueError("Il numero di sequenza deve essere un intero")
-    if not isinstance(kid, str) or not kid.strip():
-        raise ValueError("kid mancante")
-    if not isinstance(kid_cif, str) or not kid_cif.strip():
-        raise ValueError("kid_cif mancante")
-    if not isinstance(message_id, str) or not message_id.strip():
-        raise ValueError("id messaggio mancante")
-    if not isinstance(cif, str) or not cif.strip():
-        raise ValueError("flag cifratura mancante")
-
     try:
         private_key_raw = _b64url_decode(private_key_b64url.strip())
     except Exception as exc:
@@ -102,21 +89,6 @@ def verify_message_sign(
     signature_b64url: str,
 ) -> bool:
    
-    if not isinstance(public_key_b64url, str) or not public_key_b64url.strip():
-        raise ValueError("Chiave pubblica di firma mancante")
-    if not isinstance(seq, int):
-        raise ValueError("Il numero di sequenza deve essere un intero")
-    if not isinstance(kid, str) or not kid.strip():
-        raise ValueError("kid mancante")
-    if not isinstance(kid_cif, str) or not kid_cif.strip():
-        raise ValueError("kid_cif mancante")
-    if not isinstance(message_id, str) or not message_id.strip():
-        raise ValueError("id messaggio mancante")
-    if not isinstance(cif, str) or not cif.strip():
-        raise ValueError("flag cifratura mancante")
-    if not isinstance(signature_b64url, str) or not signature_b64url.strip():
-        raise ValueError("Firma mancante")
-
     try:
         public_key_raw = _b64url_decode(public_key_b64url.strip())
     except Exception as exc:
