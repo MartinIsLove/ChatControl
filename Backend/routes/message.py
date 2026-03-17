@@ -188,7 +188,7 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
                 
             set_user_vault(username, vault_ciphered)
 
-            sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_mess, "file")
+            sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_mess, "file", kids)
 
             metadata = {
                 "filename": file.filename,
@@ -357,7 +357,7 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
         if not sign_private:
             raise HTTPException(status_code=500, detail="Chiave di firma corrente non disponibile")
 
-        sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_messagge, "on")
+        sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_messagge, "on", kids)
 
         da_cifrare ={
             "cif" : "on",
@@ -391,8 +391,8 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
         #questa parte controlla che il messaggio sia entro i limiti di splittamento di telegram
         #ovvero 4096 caratteri, nel caso positivo gestisce l'invio del messaggio come file,
         #per evitare splittamenti
-        if len(finale) > MESSAGE_LIMIT:
-            sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_messagge, "message")
+        if len(json.dumps(finale)) > MESSAGE_LIMIT:
+            sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_messagge, "message", kids)
             token = secrets.token_hex(8)
             nome_file = token + ".dat"
             message_bytes = credentials.text.encode("utf-8")
@@ -403,29 +403,23 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
                 "kid": kid,
                 "kid_cif": kid_cif,
                 "seq": seq,
-                "sign": sign
+                "sign": sign,
             }
             json_metadata = json.dumps(message_metadata, sort_keys=True)
             metadata_bytes = json_metadata.encode("utf-8")
             metadata_size = len(metadata_bytes)
-            payload = metadata_size.to_bytes(4, byteorder="big") + metadata_bytes + message_bytes
-            encrypted_payload = encrypt_with_age(payload, recipient_keys)
-            if encrypted_payload is None:
+            encrypted_metadata = encrypt_with_age(metadata_size.to_bytes(4, byteorder="big") + metadata_bytes + message_bytes, recipient_keys)
+
+            payload = metadata_size.to_bytes(4, byteorder="big") + metadata_bytes + encrypted_metadata.encode('utf-8')
+            if encrypted_metadata is None:
                 raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
 
-            if isinstance(encrypted_payload, str):
-                encrypted_payload = encrypted_payload.encode("utf-8")
 
-            file_in_ram = io.BytesIO(encrypted_payload)
+            file_in_ram = io.BytesIO(payload)
             file_in_ram.name = nome_file
 
             caption = {
                 "cif":"message",
-                "id": id_messagge,
-                "kid": kid,
-                "kid_cif": kid_cif,
-                "seq": seq,
-                "sign": sign
             }
 
             try:

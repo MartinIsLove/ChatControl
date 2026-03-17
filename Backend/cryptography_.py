@@ -1,4 +1,4 @@
-import subprocess, base64, json, os, tempfile
+import subprocess, base64, json, os, tempfile, hashlib
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from cryptography.hazmat.primitives import hashes
@@ -15,7 +15,7 @@ def _b64url(data: bytes) -> str:
 def _b64url_decode(data: str) -> bytes:
     padding = (-len(data)) % 4
     return base64.urlsafe_b64decode(data + ("=" * padding))
-
+        
 def derive_signing_keys_from_age_private(age_private_key: str) -> dict[str, str]:
     
     normalized = (age_private_key or "").strip()
@@ -55,7 +55,7 @@ def derive_signing_keys_from_age_private(age_private_key: str) -> dict[str, str]
         "kid": _b64url(kid),
     }
 
-def calculate_message_sign(private_key_b64url: str, seq: int, kid: str, kid_cif: str, message_id: str, cif: str) -> str:
+def calculate_message_sign(private_key_b64url: str, seq: int, kid: str, kid_cif: str, message_id: str, cif: str, kids: list) -> str:
    
     try:
         private_key_raw = _b64url_decode(private_key_b64url.strip())
@@ -65,12 +65,15 @@ def calculate_message_sign(private_key_b64url: str, seq: int, kid: str, kid_cif:
     if len(private_key_raw) != 32:
         raise ValueError("La chiave privata di firma deve essere lunga 32 byte")
 
+    sanitized_kids = [str(k).strip() for k in kids] if kids else[]
+
     payload = {
         "seq": seq,
         "kid": kid.strip(),
         "kid_cif": kid_cif.strip(),
         "id": message_id.strip(),
         "cif": cif.strip(),
+        "kids": sanitized_kids
     }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
@@ -87,6 +90,7 @@ def verify_message_sign(
     message_id: str,
     cif: str,
     signature_b64url: str,
+    kids: list,
 ) -> bool:
    
     try:
@@ -102,12 +106,16 @@ def verify_message_sign(
     except Exception:
         return False
 
+    sanitized_kids = [str(k).strip() for k in kids] if kids else[]
+
+
     payload = {
         "seq": seq,
         "kid": kid.strip(),
         "kid_cif": kid_cif.strip(),
         "id": message_id.strip(),
         "cif": cif.strip(),
+        "kids": sanitized_kids,
     }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
@@ -213,6 +221,7 @@ def decrypt_with_age(text, private):
         return None
     
     return decrypted_text
+
 def genera_chiavi():
     try:
         risultato = subprocess.run(['age-keygen'], capture_output=True, text=True, check=True)

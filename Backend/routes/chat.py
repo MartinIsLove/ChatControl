@@ -13,6 +13,38 @@ from fastapi.responses import StreamingResponse
 
 router = APIRouter()
 
+def verify_signed_payload(sender_id, payload_id, payload_kid, payload_kid_cif, payload_seq, payload_cif, payload_sign, chat_id, data, my_id, username, entity, chat_vault, kids ):
+        chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
+        if my_id and sender_id == my_id:
+            local_kid_map = data.get('data', {}).get('chats', {}).get(chat_id_cif, {}).get('kid', {})
+            sign_private = local_kid_map.get(payload_kid) if isinstance(local_kid_map, dict) else None
+            if not sign_private:
+                return False, "chiave di firma locale non disponibile"
+            try:
+                expected_sign = calculate_message_sign(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, kids)
+            except ValueError:
+                return False, "questo messaggio e' stato modificato"
+            return (payload_sign == expected_sign), "questo messaggio e' stato modificato"
+
+        user_str = str(sender_id)
+        if is_group_chat_id(chat_id):
+            _, vault = get_gruppo_vault(username, chat_id, entity, data)
+            participant_data = vault.get('partecipanti').get(user_str)
+            if participant_data is None and isinstance(vault, dict):
+                participant_data = chat_vault.get(sender_id)
+            signing_keys = participant_data.get('chiavi_firma') 
+        else:
+            signing_keys = chat_vault.get('chiavi_firma', {}) 
+
+        if payload_kid not in signing_keys:
+            return False, "chiave di firma mittente non disponibile"
+
+        pub_sign = signing_keys.get(payload_kid)
+        try:
+            return verify_message_sign(pub_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, payload_sign, kids), "questo messaggio e' stato modificato"
+        except ValueError:
+            return False, "questo messaggio e' stato modificato"
+
 #questa funzione inizializza la WebSocket per l'aggiornamento in tempo reali dei messaggi
 @router.websocket("/ws/chats/{chat_id}")
 async def chat_events(websocket: WebSocket, chat_id: int):
@@ -151,47 +183,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
     my_id = me.id if me else None
     seq_dirty = False
     
-    def verify_signed_payload(sender_id, payload_id, payload_kid, payload_kid_cif, payload_seq, payload_cif, payload_sign):
-        if not isinstance(payload_id, str) or not payload_id.strip():
-            return False, "questo messaggio e' stato modificato"
-        if not isinstance(payload_kid, str) or not payload_kid.strip():
-            return False, "chiave di firma mittente non disponibile"
-        if not isinstance(payload_kid_cif, str) or not payload_kid_cif.strip():
-            return False, "chiave di cifratura mittente non disponibile"
-        if not isinstance(payload_cif, str) or not payload_cif.strip():
-            return False, "questo messaggio e' stato modificato"
-        if not isinstance(payload_sign, str) or not payload_sign.strip():
-            return False, "questo messaggio e' stato modificato"
-
-        if my_id and sender_id == my_id:
-            local_kid_map = data.get('data', {}).get('chats', {}).get(chat_id_cif, {}).get('kid', {})
-            sign_private = local_kid_map.get(payload_kid) if isinstance(local_kid_map, dict) else None
-            if not sign_private:
-                return False, "chiave di firma locale non disponibile"
-            try:
-                expected_sign = calculate_message_sign(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif)
-            except ValueError:
-                return False, "questo messaggio e' stato modificato"
-            return (payload_sign == expected_sign), "questo messaggio e' stato modificato"
-
-        user_str = str(sender_id)
-        if is_group_chat_id(chat_id):
-            _, vault = get_gruppo_vault(username, chat_id, entity, data)
-            participant_data = vault.get('partecipanti').get(user_str)
-            if participant_data is None and isinstance(vault, dict):
-                participant_data = chat_vault.get(sender_id)
-            signing_keys = participant_data.get('chiavi_firma') 
-        else:
-            signing_keys = chat_vault.get('chiavi_firma', {}) 
-
-        if payload_kid not in signing_keys:
-            return False, "chiave di firma mittente non disponibile"
-
-        pub_sign = signing_keys.get(payload_kid)
-        try:
-            return verify_message_sign(pub_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, payload_sign), "questo messaggio e' stato modificato"
-        except ValueError:
-            return False, "questo messaggio e' stato modificato"
+    
 
     def mark_replay_in_history(messages_list):
         stream_last_seq = {}
@@ -437,6 +429,13 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                     seq,
                     cif_flag,
                     sign,
+                    chat_id,
+                    data,
+                    my_id,
+                    username,
+                    entity,
+                    chat_vault,
+                    kids,
                 )
                 if not firma:
                     mess['error'] = sign_error
@@ -556,7 +555,6 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                 sign = mess.get('metadata_plain', {}).get('sign')
                 kids = mess.get('metadata_plain', {}).get('kids')
 
-                print(mess['metadata_plain'], " negro ", mess['encrypted_metadata'])
 
                 firma, sign_error = verify_signed_payload(
                     mess.get('sender_id'),
@@ -566,6 +564,13 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                     seq,
                     cif_flag,
                     sign,
+                    chat_id,
+                    data,
+                    my_id,
+                    username,
+                    entity,
+                    chat_vault,
+                    kids,
                 )
                 if not firma:
                     mess['error'] = sign_error
@@ -602,9 +607,9 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                                 break
                             finally:
                                 os.unlink(keyfile_path)
-                        except Exception:
+                        except Exception as e:
+                            print(e)
                             continue
-                print(decrypted_text)
                 if decrypted_text:
                     try:
                         dic_mes = json.loads(decrypted_text)
@@ -643,17 +648,72 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                                 del mess['json']
                             mess['is_json'] = False
                     except Exception as e:
+                        print(e)
                         raise HTTPException(status_code=500)
 
             
             if cif_flag == "message":
                 try:
                     mess_id = mess.get('id')
-                    mess_decrypted_id_caption = mess['json'].get('id')
-                    seq = mess['json'].get('seq')
-                    kid = mess['json'].get('kid')
-                    kid_cif = mess['json'].get('kid_cif')
-                    sign = mess['json'].get('sign')
+                    full_message = await client.get_messages(entity, ids=mess_id)
+                    if not full_message or not full_message.media or not full_message.document:
+                        continue
+
+                    file_bytes = io.BytesIO()
+                    await client.download_media(full_message, file=file_bytes)
+                    file_bytes.seek(0)
+
+                    file_head_bytes = file_bytes.getvalue()
+                    
+                    mess['file_head'] = base64.b64encode(file_head_bytes).decode()
+                    mess['file_head_size'] = len(file_head_bytes)
+
+                    # --- INIZIO NUOVA LOGICA DI ESTRAZIONE ---
+                    
+                    metadata_plain = None            # Conterrà la stringa JSON non cifrata (o il dict)
+                    header_encrypted_metadata = None # Conterrà i byte cifrati con age
+                    
+                    offset = 0
+                    
+                    # 1. Leggo la lunghezza del metadata_plain (4 bytes)
+                    if len(file_head_bytes) >= offset + 4:
+                        metadata_size = int.from_bytes(file_head_bytes[offset : offset + 4], byteorder='big')
+                        offset += 4
+                        
+                        # 2. Leggo il metadata in chiaro
+                        if 0 < metadata_size <= len(file_head_bytes) - offset:
+                            metadata_bytes = file_head_bytes[offset : offset + metadata_size]
+                            offset += metadata_size
+                            
+                            # Decodifico i byte in stringa e poi (opzionale) in un dizionario Python
+                            try:
+                                metadata_plain_str = metadata_bytes.decode('utf-8')
+                                metadata_plain = json.loads(metadata_plain_str) # Ora hai un dict usabile!
+                            except Exception as e:
+                                print(f"Errore nel parsing del metadata_plain: {e}")
+                            
+                            # 3. Leggo la lunghezza del metadata cifrato (4 bytes)
+                            
+                                
+                                # 4. Leggo il metadata cifrato
+                            
+                            encrypted_payload = file_head_bytes[offset : ]
+                            
+                            
+                            # (Facoltativo) Da questo 'offset' in poi inizia 'encrypted_file'
+
+                    # Assegno i valori estratti al messaggio per usarli dopo
+                    mess['metadata_plain'] = metadata_plain
+                    mess['encrypted_payload'] = encrypted_payload
+
+                    
+                    mess_decrypted_id_caption = mess.get('metadata_plain', {}).get('id')
+                    seq = mess.get('metadata_plain', {}).get('seq')
+                    kid = mess.get('metadata_plain', {}).get('kid')
+                    kid_cif = mess.get('metadata_plain', {}).get('kid_cif')
+                    sign = mess.get('metadata_plain', {}).get('sign')
+                    kids = mess.get('metadata_plain', {}).get('kids')
+
 
                     firma, sign_error = verify_signed_payload(
                         mess.get('sender_id'),
@@ -663,6 +723,13 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                         seq,
                         cif_flag,
                         sign,
+                        chat_id,
+                        data,
+                        my_id,
+                        username,
+                        entity,
+                        chat_vault,
+                        kids,
                     )
                     if not firma:
                         mess['error'] = sign_error
@@ -673,14 +740,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                     if not mess_id:
                         continue
 
-                    full_message = await client.get_messages(entity, ids=mess_id)
-                    if not full_message or not full_message.media or not full_message.document:
-                        continue
-
-                    file_bytes = io.BytesIO()
-                    await client.download_media(full_message, file=file_bytes)
-                    file_bytes.seek(0)
-                    encrypted_payload = file_bytes.getvalue()
+                    
 
                     chats_data = data['data'].get('chats', {})
                     chat_keys = chats_data.get(chat_id_cif, {})
@@ -690,9 +750,9 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                     for private in candidate_privates:
                         try:
                             try:
-                                input_bytes = base64.b64decode(encrypted_payload)
+                                input_bytes = base64.b64decode(mess['encrypted_payload'])
                             except Exception:
-                                input_bytes = encrypted_payload
+                                input_bytes = mess['encrypted_payload']
                             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
                                 keyfile.write(private)
                                 keyfile_path = keyfile.name
@@ -710,7 +770,6 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                         except Exception:
                             continue
                     
-
                     if decrypted_payload and len(decrypted_payload) >= 4:
                         metadata_size = int.from_bytes(decrypted_payload[:4], byteorder='big')
                         if 0 < metadata_size <= len(decrypted_payload) - 4:
@@ -731,6 +790,13 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                                     inner_metadata.get('seq'),
                                     inner_metadata.get('cif'),
                                     inner_metadata.get('sign'),
+                                    chat_id,
+                                    data,
+                                    my_id,
+                                    username,
+                                    entity,
+                                    chat_vault,
+                                    kids,
                                 )
                                 if not firma:
                                     mess['error'] = sign_error
@@ -769,8 +835,8 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                                     mess['_secure_seq'] = seq_inner
                                     mess['_secure_sender_key'] = sender_key
                                     update_max_seq_in_vault(mess.get('sender_id'), seq_inner)
-                except Exception:
-                    raise HTTPException(status_code=500)
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail= f"ricezione fallita: {e}")
 
 
     await mark_replay_on_chunk_boundary(messages)
@@ -817,7 +883,8 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
             
         except sqlite3.Error as error:
             raise HTTPException(status_code=500, detail=str(error))
-
+        except Exception as e:
+            print (e)
     messages.reverse() 
     return {"chat_id": chat_id, "messages": messages}
 
@@ -942,14 +1009,25 @@ async def download_media(chat_id: int, message_id: int, login_session: str = Coo
 async def download_encrypt_media(chat_id: int, message_id: int, login_session: str = Cookie(None)):
     _, data = is_logged_in(login_session, True)
     client = data['client']
-    
+
     if not client.is_connected():
         await client.connect()
     
     try:
+        username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
+
+        me = await client.get_me()
+        my_id = me.id if me else None
         entity = await client.get_entity(chat_id)
         message = await client.get_messages(entity, ids=message_id)
-
+        try:
+            if is_group_chat_id(chat_id):
+                _, chat_vault = get_gruppo_vault(username, chat_id, entity, data)
+            else:
+                _, chat_vault = await get_chat_vault(username, chat_id, client, data)
+        except sqlite3.Error as error:
+            raise HTTPException(status_code=500, detail=str(error))
+        
         if not message:
             raise HTTPException(
                 status_code=404,
@@ -980,73 +1058,121 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
         if cif_flag != "file":
             raise HTTPException(status_code=400, detail="Caption non cifrata")
 
+        file_bytes = io.BytesIO()
+        full_message = await client.download_media(message, file=file_bytes)
+        file_bytes.seek(0)
+        mess = {}
+
+        
+        full_message = await client.get_messages(entity, ids=message_id)
+        if full_message and full_message.media:
+            file_bytes = io.BytesIO()            
+            await client.download_media(full_message, file=file_bytes)
+            
+            file_bytes.seek(0)
+            file_head_bytes = file_bytes.getvalue()
+            
+            mess['file_head'] = base64.b64encode(file_head_bytes).decode()
+            mess['file_head_size'] = len(file_head_bytes)
+
+            # --- INIZIO NUOVA LOGICA DI ESTRAZIONE ---
+            
+            metadata_plain = None            # Conterrà la stringa JSON non cifrata (o il dict)
+            header_encrypted_metadata = None # Conterrà i byte cifrati con age
+            
+            offset = 0
+            
+            # 1. Leggo la lunghezza del metadata_plain (4 bytes)
+            if len(file_head_bytes) >= offset + 4:
+                metadata_size = int.from_bytes(file_head_bytes[offset : offset + 4], byteorder='big')
+                offset += 4
+                
+                # 2. Leggo il metadata in chiaro
+                if 0 < metadata_size <= len(file_head_bytes) - offset:
+                    metadata_bytes = file_head_bytes[offset : offset + metadata_size]
+                    offset += metadata_size
+                    
+                    # Decodifico i byte in stringa e poi (opzionale) in un dizionario Python
+                    try:
+                        metadata_plain_str = metadata_bytes.decode('utf-8')
+                        metadata_plain = json.loads(metadata_plain_str) # Ora hai un dict usabile!
+                    except Exception as e:
+                        print(f"Errore nel parsing del metadata_plain: {e}")
+                    
+                    # 3. Leggo la lunghezza del metadata cifrato (4 bytes)
+                    if len(file_head_bytes) >= offset + 4:
+                        encrypted_metadata_size = int.from_bytes(file_head_bytes[offset : offset + 4], byteorder='big')
+                        offset += 4
+                        
+                        # 4. Leggo il metadata cifrato
+                        if 0 < encrypted_metadata_size <= len(file_head_bytes) - offset:
+                            header_encrypted_metadata = file_head_bytes[offset : offset + encrypted_metadata_size]
+                            offset += encrypted_metadata_size
+                            
+                            encrypted_file = file_head_bytes[offset : ]
+                            # (Facoltativo) Da questo 'offset' in poi inizia 'encrypted_file'
+
+        # Assegno i valori estratti al messaggio per usarli dopo
+                mess['metadata_plain'] = metadata_plain
+                mess['encrypted_metadata'] = header_encrypted_metadata
+                mess['file'] = encrypted_file
+        mess_decrypted_id_caption = mess.get('metadata_plain', {}).get('id')
+        seq = mess.get('metadata_plain', {}).get('seq')
+        kid = mess.get('metadata_plain', {}).get('kid')
+        kid_cif = mess.get('metadata_plain', {}).get('kid_cif')
+        sign = mess.get('metadata_plain', {}).get('sign')
+        kids = mess.get('metadata_plain', {}).get('kids')
+
+
+        firma, sign_error = verify_signed_payload(
+                    message.sender_id,
+                    mess_decrypted_id_caption,
+                    kid,
+                    kid_cif,
+                    seq,
+                    cif_flag,
+                    sign,
+                    chat_id,
+                    data,
+                    my_id,
+                    username,
+                    entity,
+                    chat_vault,
+                    kids,
+                )
+        if not firma:
+            raise HTTPException(status_code=400, detail=sign_error)
+
+        
+
+
         chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
         chats_data = data['data'].get('chats', {})
         chat_keys = chats_data.get(chat_id_cif, {})
-        kid_cif = caption_json.get('kid_cif')
+        
         candidate_privates = build_candidate_privates(chat_keys, kid_cif=kid_cif)
         if not candidate_privates:
             raise HTTPException(status_code=400, detail="Nessuna chiave disponibile")
 
-        file_bytes = io.BytesIO()
-        await client.download_media(message, file=file_bytes)
-        file_bytes.seek(0)
+        decrypted_payload= decrypt_file_with_age(mess['file'], candidate_privates)
+        inner_metadata_decrypted = decrypt_file_with_age(mess['encrypted_metadata'], candidate_privates)
 
-        encrypted_payload_bytes = file_bytes.getvalue()
-        if len(encrypted_payload_bytes) < 8:
-            raise HTTPException(status_code=400, detail="Payload non valido")
-
-        header_metadata_size = int.from_bytes(encrypted_payload_bytes[:4], byteorder='big')
-        header_encrypted_size = int.from_bytes(encrypted_payload_bytes[4:8], byteorder='big')
-        if header_encrypted_size <= 0 or header_encrypted_size > len(encrypted_payload_bytes) - 8:
-            raise HTTPException(status_code=400, detail="Header metadata non valido")
-
-        header_encrypted_metadata = encrypted_payload_bytes[8:8 + header_encrypted_size]
-        decrypted_metadata_bytes = decrypt_file_with_age(header_encrypted_metadata, candidate_privates)
-        if not decrypted_metadata_bytes:
-            raise HTTPException(status_code=400, detail="Impossibile decifrare i metadata")
-
-        if header_metadata_size != len(decrypted_metadata_bytes):
-            raise HTTPException(status_code=400, detail="Dimensione metadata non valida")
-
-        try:
-            outer_metadata_str = decrypted_metadata_bytes.decode('utf-8')
-            outer_metadata = json.loads(outer_metadata_str)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Metadata esterni non validi")
-
-        if outer_metadata.get('cif') != 'file':
-            raise HTTPException(status_code=400, detail="Metadata esterni non cifrati")
-
-        encrypted_body = encrypted_payload_bytes[8 + header_encrypted_size:]
-        decrypted_payload = decrypt_file_with_age(encrypted_body, candidate_privates)
-        if not decrypted_payload:
-            raise HTTPException(status_code=400, detail="Impossibile decifrare il file")
-
-        if len(decrypted_payload) < 4:
-            raise HTTPException(status_code=400, detail="Payload non valido")
-
-        metadata_size = int.from_bytes(decrypted_payload[:4], byteorder='big')
-        if metadata_size <= 0 or metadata_size > len(decrypted_payload) - 4:
-            raise HTTPException(status_code=400, detail="Dimensione metadata non valida")
-
-        inner_metadata_bytes = decrypted_payload[4:4 + metadata_size]
-        file_content = decrypted_payload[4 + metadata_size:]
-
-        try:
-            inner_metadata_str = inner_metadata_bytes.decode('utf-8')
-            inner_metadata = json.loads(inner_metadata_str)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Metadata interni non validi")
-
-        if inner_metadata != outer_metadata:
-            raise HTTPException(status_code=409, detail="Metadata non corrispondenti")
-
+        metadata_plain_str = inner_metadata_decrypted.decode('utf-8')
+        inner_metadata = json.loads(metadata_plain_str)
+        
+        if mess['metadata_plain'] != inner_metadata:
+            raise HTTPException(status_code=400, detail="Metadati non coerenti")
+        
         out_filename = os.path.basename(inner_metadata.get('filename') or 'file.bin')
         mime_type = inner_metadata.get('mime') or mimetypes.guess_type(out_filename)[0] or 'application/octet-stream'
 
+        if isinstance(decrypted_payload, (bytes, bytearray)):
+            payload_iter = iter([decrypted_payload])
+        else:
+            payload_iter = iter(decrypted_payload)
+
         return StreamingResponse(
-            iter([file_content]),
+            payload_iter,
             media_type=mime_type,
             headers={
                 'Content-Disposition': f'attachment; filename="{out_filename}"',
@@ -1054,4 +1180,5 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
             }
         )
     except Exception as e:
+        print(e)
         raise HTTPException(status_code=502, detail=f"Errore download: {str(e)}")

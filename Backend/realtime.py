@@ -75,6 +75,7 @@ def _verify_signed_payload(
     payload_seq,
     payload_cif,
     payload_sign,
+    kids,
 ) -> tuple[bool, str]:
 
     if my_id and sender_id == my_id:
@@ -83,7 +84,7 @@ def _verify_signed_payload(
         if not sign_private:
             return False, "chiave di firma locale non disponibile"
         try:
-            expected_sign = calculate_message_sign(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif)
+            expected_sign = calculate_message_sign(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, kids)
         except ValueError:
             return False, "questo messaggio e' stato modificato"
         return (payload_sign == expected_sign), "questo messaggio e' stato modificato"
@@ -93,7 +94,7 @@ def _verify_signed_payload(
     if not pub_sign:
         return False, "chiave di firma mittente non disponibile"
     try:
-        return verify_message_sign(pub_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, payload_sign), "questo messaggio e' stato modificato"
+        return verify_message_sign(pub_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, payload_sign, kids), "questo messaggio e' stato modificato"
     except ValueError:
         return False, "questo messaggio e' stato modificato"
 
@@ -441,6 +442,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                         seq,
                         cif_flag,
                         sign,
+                        kids,
                     )
 
                     if not valid_sign:
@@ -522,11 +524,81 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
 
                 if cif_flag == "message":
                     try:
-                        id_message = mess_data['json'].get('id')
-                        seq = mess_data['json'].get('seq')
-                        kid = mess_data['json'].get('kid')
-                        kid_cif = mess_data['json'].get('kid_cif')
-                        sign = mess_data['json'].get('sign')
+                        mess_id = mess_data['id']
+                        if not mess_id:
+                            mess_data['error'] = "nessun message id presente"
+                            payload = {
+                                        "event_type": "new",
+                                        "chat_id": event.chat_id,
+                                        "message": mess_data,
+                                    }
+                            await broadcast_event(temp_id, event.chat_id, payload)
+                            return
+                        full_message = await client.get_messages(entity, ids=mess_id)
+                        if not full_message or not full_message.media or not full_message.document:
+                            mess_data['error'] = sign_error
+                            if 'json' in mess_data:
+                                del mess_data['json']
+                            mess_data['is_json'] = False
+                            payload = {
+                                "event_type": "new",
+                                "chat_id": event.chat_id,
+                                "message": mess_data,
+                            }
+                            await broadcast_event(temp_id, event.chat_id, payload)
+                            return
+
+                        file_bytes = io.BytesIO()
+                        await client.download_media(full_message, file=file_bytes)
+                        file_bytes.seek(0)
+
+                        file_head_bytes = file_bytes.getvalue()
+                        
+                        mess_data['file_head'] = base64.b64encode(file_head_bytes).decode()
+                        mess_data['file_head_size'] = len(file_head_bytes)
+
+                        # --- INIZIO NUOVA LOGICA DI ESTRAZIONE ---
+                        
+                        metadata_plain = None            # Conterrà la stringa JSON non cifrata (o il dict)
+                        header_encrypted_metadata = None # Conterrà i byte cifrati con age
+                        
+                        offset = 0
+                        
+                        # 1. Leggo la lunghezza del metadata_plain (4 bytes)
+                        if len(file_head_bytes) >= offset + 4:
+                            metadata_size = int.from_bytes(file_head_bytes[offset : offset + 4], byteorder='big')
+                            offset += 4
+                            
+                            # 2. Leggo il metadata in chiaro
+                            if 0 < metadata_size <= len(file_head_bytes) - offset:
+                                metadata_bytes = file_head_bytes[offset : offset + metadata_size]
+                                offset += metadata_size
+                                
+                                # Decodifico i byte in stringa e poi (opzionale) in un dizionario Python
+                                try:
+                                    metadata_plain_str = metadata_bytes.decode('utf-8')
+                                    mess_data['metadata_plain'] = json.loads(metadata_plain_str) # Ora hai un dict usabile!
+                                except Exception as e:
+                                    print(f"Errore nel parsing del metadata_plain: {e}")
+                                
+                                # 3. Leggo la lunghezza del metadata cifrato (4 bytes)
+                                
+                                    
+                                    # 4. Leggo il metadata cifrato
+                                
+                                mess_data['encrypted_payload'] = file_head_bytes[offset : ]
+                                
+                                
+                                # (Facoltativo) Da questo 'offset' in poi inizia 'encrypted_file'
+
+                        # Assegno i valori estratti al messaggio per usarli 
+                        print(mess_data['metadata_plain'])
+                        id_message = mess_data.get('metadata_plain', {}).get('id')
+                        seq = mess_data.get('metadata_plain', {}).get('seq')
+                        kid = mess_data.get('metadata_plain', {}).get('kid')
+                        kid_cif = mess_data.get('metadata_plain', {}).get('kid_cif')
+                        sign = mess_data.get('metadata_plain', {}).get('sign')
+                        kids = mess_data.get('metadata_plain', {}).get('kids')
 
                         valid_sign, sign_error = _verify_signed_payload(
                             data,
@@ -540,6 +612,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                             seq,
                             cif_flag,
                             sign,
+                            kids,
                         )
                         if not valid_sign:
                             mess_data['error'] = sign_error
@@ -554,33 +627,6 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                             await broadcast_event(temp_id, event.chat_id, payload)
                             return
 
-                        mess_id = mess_data.get('id')
-                        if not mess_id:
-                            mess_data['error'] = "nessun message id presente"
-                            payload = {
-                                        "event_type": "new",
-                                        "chat_id": event.chat_id,
-                                        "message": mess_data,
-                                    }
-                            await broadcast_event(temp_id, event.chat_id, payload)
-                            return
-
-                        full_mess = await client.get_messages(entity, ids=mess_id)
-                        if not full_mess or not full_mess.media or not full_mess.document:
-                            mess_data['error'] = "il messaggio dovrebbe contenere un documento, ma non e' presente"
-                            payload = {
-                                        "event_type": "new",
-                                        "chat_id": event.chat_id,
-                                        "message": mess_data,
-                                    }
-                            await broadcast_event(temp_id, event.chat_id, payload)
-                            return
-
-                        file_bytes = io.BytesIO()
-                        await client.download_media(full_mess, file=file_bytes)
-                        file_bytes.seek(0)
-                        encrypted_payload = file_bytes.getvalue()
-
                         chats_data = data['data'].get('chats', {})
                         chat_keys = chats_data.get(chat_id_cif, {})
                         candidate_privates = build_candidate_privates(chat_keys, kid_cif=kid_cif)
@@ -589,9 +635,9 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                         for privata in candidate_privates:
                             try:
                                 try:
-                                    input_bytes = base64.b64decode(encrypted_payload)
+                                    input_bytes = base64.b64decode(mess_data['encrypted_payload'])
                                 except Exception:
-                                    input_bytes = encrypted_payload
+                                    input_bytes = mess_data['encrypted_payload']
                                 with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
                                     keyfile.write(privata)
                                     keyfile_path = keyfile.name
@@ -609,8 +655,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                             except Exception:
                                 continue
                         
-
-                        if decrypted_payload and len(decrypted_payload) >= 4:
+                        if decrypted_payload:
                             metadata_size = int.from_bytes(decrypted_payload[:4], byteorder='big')
                             if 0 < metadata_size <= len(decrypted_payload) - 4:
                                 inner_metadata_bytes = decrypted_payload[4:4 + metadata_size]
@@ -635,6 +680,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                         inner_metadata.get('seq'),
                                         inner_metadata.get('cif'),
                                         inner_metadata.get('sign'),
+                                        kids,
                                     )
                                     if not valid_sign:
                                         mess_data['error'] = sign_error
@@ -685,14 +731,21 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                         }
                                         await broadcast_event(temp_id, event.chat_id, payload)
                                         return
-
+                                
                                     mess_data['text'] = message_bytes.decode('utf-8', errors='replace')
+                                    print(mess_data['text'], "negrone")
 
                                     if 'json' in mess_data:
                                         del mess_data['json']
                                     mess_data['is_json'] = False
                                     mess_data['secure'] = True
                                     mess_data['file'] = False
+
+                                    mess_data.pop('encrypted_payload', None)
+                                    mess_data.pop('file_head', None)
+                                    mess_data.pop('file_head_size', None)
+                                    mess_data.pop('metadata_plain', None)
+
                                     mess_data.pop('media_type', None)
                                     mess_data.pop('filename', None)
                                     mess_data.pop('mime', None)
@@ -800,6 +853,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                         seq,
                         cif_flag,
                         sign,
+                        kids,
                     )
                     if not valid_sign:
                         mess_data['error'] = sign_error
@@ -885,6 +939,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                                     mess_dic.get('seq'),
                                     mess_dic.get('cif'),
                                     mess_dic.get('sign'),
+                                    kids,
                                 )
                                 if not valid_sign:
                                     mess_data['error'] = sign_error
