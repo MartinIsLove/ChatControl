@@ -396,25 +396,37 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                         await broadcast_event(temp_id, event.chat_id, payload)
                         return
 
-                    pubblic = parsed.get("public")
+                    public = parsed.get("public")
                     kid = parsed.get('kid')
                     kid_cif = parsed.get('kid_cif')
                     pub_sign = parsed.get('pub_sign')
-                    if pubblic and is_valid_age_public_key(pubblic):
-                        user_data = login_cache.get(temp_id)
-                        if user_data:
-                            store_public_key_in_vault(
-                                user_data,
-                                event.chat_id,
-                                event.message.sender_id,
-                                pubblic,
-                                kid=kid,
-                                kid_cif=kid_cif,
-                                pub_sign=pub_sign,
-                                msg_date=msg.get('date'),
-                                is_group=_is_group_chat_id(event.chat_id),
-                                group_title=getattr(event.chat, "title", "Gruppo")
-                            )
+                    if not is_valid_age_public_key(public) or any(t is None for t in (public, kid, kid_cif, pub_sign)):
+                        msg['error'] = "Questo messaggio è stato modificato"
+                        if 'json' in msg:
+                            del msg['json']
+                        msg['is_json'] = False
+                        payload = {
+                            "event_type": "new",
+                            "chat_id": event.chat_id,
+                            "message": msg,
+                        }
+                        await broadcast_event(temp_id, event.chat_id, payload)
+                        return
+
+                    user_data = login_cache.get(temp_id)
+                    if user_data:
+                        store_public_key_in_vault(
+                            user_data,
+                            event.chat_id,
+                            event.message.sender_id,
+                            public,
+                            kid=kid,
+                            kid_cif=kid_cif,
+                            pub_sign=pub_sign,
+                            msg_date=msg.get('date'),
+                            is_group=_is_group_chat_id(event.chat_id),
+                            group_title=getattr(event.chat, "title", "Gruppo")
+                        )
                     msg['text'] = None
                     msg['chiave'] = "Questo messaggio e' uno scambio di chiave"
                     msg['is_system'] = True
@@ -427,6 +439,19 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                     kid_cif = msg['json'].get('kid_cif')
                     sign = msg['json'].get('sign')
                     kids = msg['json'].get('kids')
+
+                    if any(t is None for t in (seq, kid, kid_cif, sign, text, id_message, kids)):
+                        msg['error'] = "Questo messaggio è stato modificato"
+                        if 'json' in msg:
+                            del msg['json']
+                        msg['is_json'] = False
+                        payload = {
+                            "event_type": "new",
+                            "chat_id": event.chat_id,
+                            "message": msg,
+                        }
+                        await broadcast_event(temp_id, event.chat_id, payload)
+                        return
 
                     valid_sign, sign_error = _verify_signed_payload(
                         data,
@@ -540,6 +565,19 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                         kid_cif = msg.get('metadata_plain', {}).get('kid_cif')
                         sign = msg.get('metadata_plain', {}).get('sign')
                         kids = msg.get('metadata_plain', {}).get('kids')
+
+                        if any(t is None for t in (seq, kid, kid_cif, sign, id_message, kids)):
+                            msg['error'] = "Questo messaggio è stato modificato"
+                            if 'json' in msg:
+                                del msg['json']
+                            msg['is_json'] = False
+                            payload = {
+                                "event_type": "new",
+                                "chat_id": event.chat_id,
+                                "message": msg,
+                            }
+                            await broadcast_event(temp_id, event.chat_id, payload)
+                            return
 
                         valid_sign, sign_error = _verify_signed_payload(
                             data,
@@ -662,6 +700,19 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                     kid_cif = msg.get('metadata_plain', {}).get('kid_cif')
                     sign = msg.get('metadata_plain', {}).get('sign')
                     kids = msg.get('metadata_plain', {}).get('kids')
+
+                    if any(t is None for t in (seq, kid, kid_cif, sign, id_message, kids)):
+                        msg['error'] = "Questo messaggio è stato modificato"
+                        if 'json' in msg:
+                            del msg['json']
+                        msg['is_json'] = False
+                        payload = {
+                            "event_type": "new",
+                            "chat_id": event.chat_id,
+                            "message": msg,
+                        }
+                        await broadcast_event(temp_id, event.chat_id, payload)
+                        return
 
                     valid_sign, sign_error = _verify_signed_payload(
                         data,

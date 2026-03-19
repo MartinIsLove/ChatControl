@@ -388,8 +388,11 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                 kid = msg['json'].get('kid')
                 kid_cif = msg['json'].get('kid_cif')
                 pub_sign = msg['json'].get('pub_sign')
-                if public is None or not is_valid_age_public_key(public) or pub_sign is None:
-                    
+                if not is_valid_age_public_key(public) or any(t is None for t in (public, kid, kid_cif, pub_sign)):
+                    msg['error'] = "questo messaggio e' stato modificato"
+                    if 'json' in msg:
+                        del msg['json']
+                    msg['is_json'] = False
                     continue
                 store_public_key_in_vault(
                     data,
@@ -409,16 +412,23 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                 
             if cif_flag == "on":
                 text = msg['json'].get('text')
-                mess_decrypted_id_caption = msg['json'].get('id')
+                msg_decrypted_id_caption = msg['json'].get('id')
                 seq = msg['json'].get('seq')
                 kid = msg['json'].get('kid')
                 kid_cif = msg['json'].get('kid_cif') or msg['json'].get('kid_age')
                 sign = msg['json'].get('sign')
                 kids = msg['json'].get('kids')
                 
+                if  any(t is None for t in (seq, kid, kid_cif, sign, text, msg_decrypted_id_caption, kids)):
+                    msg['error'] = "questo messaggio e' stato modificato"
+                    if 'json' in msg:
+                        del msg['json']
+                    msg['is_json'] = False
+                    continue
+
                 firma, sign_error = verify_signed_payload(
                     msg.get('sender_id'),
-                    mess_decrypted_id_caption,
+                    msg_decrypted_id_caption,
                     kid,
                     kid_cif,
                     seq,
@@ -480,17 +490,23 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
             if cif_flag == "file":
                 msg['metadata_plain'], msg['encrypted_metadata'] = await take_file_data(client, entity, msg, cif_flag)
         
-                mess_decrypted_id_caption = msg.get('metadata_plain', {}).get('id')
+                msg_decrypted_id_caption = msg.get('metadata_plain', {}).get('id')
                 seq = msg.get('metadata_plain', {}).get('seq')
                 kid = msg.get('metadata_plain', {}).get('kid')
                 kid_cif = msg.get('metadata_plain', {}).get('kid_cif')
                 sign = msg.get('metadata_plain', {}).get('sign')
                 kids = msg.get('metadata_plain', {}).get('kids')
 
+                if  any(t is None for t in (seq, kid, kid_cif, sign, msg_decrypted_id_caption, kids)):
+                    msg['error'] = "questo messaggio e' stato modificato"
+                    if 'json' in msg:
+                        del msg['json']
+                    msg['is_json'] = False
+                    continue
 
                 firma, sign_error = verify_signed_payload(
                     msg.get('sender_id'),
-                    mess_decrypted_id_caption,
+                    msg_decrypted_id_caption,
                     kid,
                     kid_cif,
                     seq,
@@ -555,16 +571,23 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                 try:
                     msg['metadata_plain'],msg['encrypted_payload'] = await take_file_data(client, entity, msg, cif_flag)
                             
-                    mess_decrypted_id_caption = msg.get('metadata_plain', {}).get('id')
+                    msg_decrypted_id_caption = msg.get('metadata_plain', {}).get('id')
                     seq = msg.get('metadata_plain', {}).get('seq')
                     kid = msg.get('metadata_plain', {}).get('kid')
                     kid_cif = msg.get('metadata_plain', {}).get('kid_cif')
                     sign = msg.get('metadata_plain', {}).get('sign')
                     kids = msg.get('metadata_plain', {}).get('kids')
 
+                    if  any(t is None for t in (seq, kid, kid_cif, sign, msg_decrypted_id_caption, kids)):
+                        msg['error'] = "questo messaggio e' stato modificato"
+                        if 'json' in msg:
+                            del msg['json']
+                        msg['is_json'] = False
+                        continue
+
                     firma, sign_error = verify_signed_payload(
                         msg.get('sender_id'),
-                        mess_decrypted_id_caption,
+                        msg_decrypted_id_caption,
                         kid,
                         kid_cif,
                         seq,
@@ -637,24 +660,29 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
         msg.pop('_secure_seq', None)
         msg.pop('_secure_sender_key', None)
 
+    print(seq_dirty)
     if seq_dirty:
         try:
             if is_group_chat_id(chat_id):
                 latest_insert_new_vault, latest_chat_vault = get_gruppo_vault(username, chat_id, entity, data)
                 latest_participants = latest_chat_vault.setdefault('partecipanti', {})
+                print(isinstance(latest_participants, dict))
                 if not isinstance(latest_participants, dict):
                     latest_participants = {}
                     latest_chat_vault['partecipanti'] = latest_participants
 
                 local_participants = vault if isinstance(vault, dict) else {}
                 for sender_key, local_participant in local_participants.items():
+                    print(isinstance(local_participant, dict))
                     if not isinstance(local_participant, dict):
                         continue
                     local_seq = local_participant.get('seq')
+                    print(not isinstance(local_seq, int))
                     if not isinstance(local_seq, int):
                         continue
 
                     latest_participant = latest_participants.get(sender_key)
+                    print(not isinstance(latest_participant, dict))
                     if not isinstance(latest_participant, dict):
                         latest_participant = {}
                         latest_participants[sender_key] = latest_participant
@@ -664,8 +692,11 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                         latest_participant['seq'] = local_seq
             else:
                 latest_insert_new_vault, latest_chat_vault = await get_chat_vault(username, chat_id, client, data)
+                print(isinstance(vault, dict))
                 local_seq = vault.get('seq') if isinstance(vault, dict) else None
+                print(isinstance(local_seq, int))
                 if isinstance(local_seq, int):
+                    print(isinstance(latest_chat_vault.get('seq'), int))
                     latest_seq = latest_chat_vault.get('seq') if isinstance(latest_chat_vault.get('seq'), int) else None
                     if latest_seq is None or local_seq > latest_seq:
                         latest_chat_vault['seq'] = local_seq
