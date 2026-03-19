@@ -1,7 +1,7 @@
 from cryptography.fernet import Fernet
 from config import secret_key
 from fastapi import Cookie, HTTPException
-import time, re
+import time, re, base64, io, json
 from telethon.tl.types import DocumentAttributeAnimated
 from pydantic import BaseModel
 
@@ -15,7 +15,79 @@ login_cache = {}
 class iniz (BaseModel):
     chat_id: int
 
+def are_metadata_equals(inner, outer):
+    tmp_inside= inner.copy()
+    tmp_inside.pop('text', None)
+    tmp_outside = outer.copy()
+    tmp_outside.pop('text', None)
+    return tmp_inside == tmp_outside
 
+async def take_file_data(client, entity, msg, cif_flag: str):
+    try:
+        mess_id = msg.get('id')
+        if mess_id:
+            full_message = await client.get_messages(entity, ids=mess_id)
+            if not full_message or not full_message.media or not full_message.document:
+                return None, None
+            file_bytes = io.BytesIO()
+
+            if cif_flag == "message":
+                await client.download_media(full_message, file=file_bytes)
+        
+            elif cif_flag == "file":
+                max_bytes = 64 * 1024
+                downloaded = 0
+                async for chunk in client.iter_download(full_message, offset=0, limit=max_bytes):
+                    if not chunk:
+                        break
+                    file_bytes.write(chunk)
+                    downloaded += len(chunk)
+                    if downloaded >= max_bytes:
+                        break
+
+            file_bytes.seek(0)
+
+            file_head_bytes = file_bytes.getvalue()
+            
+            msg['file_head'] = base64.b64encode(file_head_bytes).decode()
+            msg['file_head_size'] = len(file_head_bytes)
+            
+            metadata_plain = None           
+            header_encrypted_metadata = None
+            
+            offset = 0
+            
+            if len(file_head_bytes) >= offset + 4:
+                metadata_size = int.from_bytes(file_head_bytes[offset : offset + 4], byteorder='big')
+                offset += 4
+                
+                if 0 < metadata_size <= len(file_head_bytes) - offset:
+                    metadata_bytes = file_head_bytes[offset : offset + metadata_size]
+                    offset += metadata_size
+                    
+                    try:
+                        metadata_plain_str = metadata_bytes.decode('utf-8')
+                        metadata_plain = json.loads(metadata_plain_str) 
+                    except Exception as e:
+                        raise HTTPException(status_code=500, detail= f"parsing dei dati fallito: {e}")
+                    
+                    if cif_flag == "message":
+                        encrypted_payload = file_head_bytes[offset : ]
+                        return  metadata_plain, encrypted_payload
+                    
+                    elif cif_flag == "file":
+                        if len(file_head_bytes) >= offset + 4:
+                            encrypted_metadata_size = int.from_bytes(file_head_bytes[offset : offset + 4], byteorder='big')
+                            offset += 4
+                            
+                            if 0 < encrypted_metadata_size <= len(file_head_bytes) - offset:
+                                header_encrypted_metadata = file_head_bytes[offset : offset + encrypted_metadata_size]
+                                offset += encrypted_metadata_size
+                                return  metadata_plain, header_encrypted_metadata
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail= f"estrazione metadata e dati dal file fallita: {e}")
+    
 def split_message(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
     if limit <= 0:
         raise ValueError("limit must be > 0")
@@ -50,11 +122,7 @@ def is_valid_age_public_key(key: str):
         return True
     return False
 
-
-
-
-
-def build_candidate_privates_test(chat_keys: dict, kids, kid_cif: str | None = None):
+def build_candidate_privates(chat_keys: dict, kids, kid_cif: str | None = None):
     
     age_key_map = chat_keys.get('chiavi_cif', {})
     selected_kid = list(set(kids) & age_key_map.keys() )
@@ -64,44 +132,6 @@ def build_candidate_privates_test(chat_keys: dict, kids, kid_cif: str | None = N
         selected_key = age_key_map.get(kid_).get('privata')
 
     return selected_key
-
-
-
-
-
-def build_candidate_privates(chat_keys: dict, kid_cif: str | None = None):
-    if not isinstance(chat_keys, dict):
-        return []
-
-    candidate_privates = []
-    seen = set()
-
-    def _append_private(value):
-        if not value or value in seen:
-            return
-        seen.add(value)
-        candidate_privates.append(value)
-
-    age_key_map = chat_keys.get('chiavi_cif', {})
-
-    
-    selected_key = None
-    selected_key = age_key_map.get(kid_cif)
-
-    current_kid_cif = chat_keys.get('kid_cif_corrente')
-
-    selected_key = age_key_map.get(current_kid_cif)
-    if selected_key is not None:
-        _append_private(selected_key.get('privata'))
-
-    for _, key_data in sorted(
-        age_key_map.items(),
-        key=lambda item: (item[1] or {}).get('inizio', 0),
-        reverse=True,
-    ):
-        _append_private(key_data.get('privata'))
-
-    return candidate_privates
 
 #questa funzione ritorna se la conversazione è un gruppo oppure no
 def is_group_chat_id(chat_id: int) -> bool:

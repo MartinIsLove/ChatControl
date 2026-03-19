@@ -366,7 +366,8 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
             "kid": kid,
             "kid_cif": kid_cif,
             "seq": seq,
-            "sign": sign
+            "sign": sign,
+            "kids": kids
         }
 
         

@@ -167,39 +167,15 @@ def encrypt_with_age(plaintext: str | bytes, public_keys: list):
         return base64.b64encode(ciphertext).decode()
     except subprocess.CalledProcessError as e:
         return None
-
-def decrypt_file_with_age(ciphertext, candidate_privates):
-    for privata in candidate_privates:
-        try:
-            try:
-                input_bytes = base64.b64decode(ciphertext)
-            except Exception:
-                input_bytes = ciphertext if isinstance(ciphertext, (bytes, bytearray)) else str(ciphertext).encode()
-
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
-                keyfile.write(privata)
-                keyfile_path = keyfile.name
-            try:
-                result = subprocess.run(
-                    ['age', '-d', '-i', keyfile_path],
-                    input=input_bytes,
-                    capture_output=True,
-                    check=True
-                )
-                return result.stdout
-            finally:
-                os.unlink(keyfile_path)
-        except Exception:
-            continue
-    return None
-
-def decrypt_with_age(text, private):
+    
+def decrypt_with_age(text, private, decode = True):
     try:
                     
         try:
             text_bytes = base64.b64decode(text)
         except:
-            text_bytes = text.encode()
+            text_bytes = text if isinstance(text, (bytes, bytearray)) else str(text).encode()
+
         
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
             keyfile.write(private)
@@ -211,8 +187,10 @@ def decrypt_with_age(text, private):
                 capture_output=True,
                 check=True
             )
-            decrypted_text = result.stdout.decode()
-            
+            if decode:
+                decrypted_text = result.stdout.decode()
+            else:
+                decrypted_text = result.stdout
         finally:
             os.unlink(keyfile_path)
            
