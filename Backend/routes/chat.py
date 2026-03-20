@@ -660,48 +660,47 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
         msg.pop('_secure_seq', None)
         msg.pop('_secure_sender_key', None)
 
-    print(seq_dirty)
     if seq_dirty:
         try:
             if is_group_chat_id(chat_id):
                 latest_insert_new_vault, latest_chat_vault = get_gruppo_vault(username, chat_id, entity, data)
+                
                 latest_participants = latest_chat_vault.setdefault('partecipanti', {})
-                print(isinstance(latest_participants, dict))
                 if not isinstance(latest_participants, dict):
                     latest_participants = {}
                     latest_chat_vault['partecipanti'] = latest_participants
 
-                local_participants = vault if isinstance(vault, dict) else {}
-                for sender_key, local_participant in local_participants.items():
-                    print(isinstance(local_participant, dict))
-                    if not isinstance(local_participant, dict):
-                        continue
+                for sender_key, local_participant in vault.items():
                     local_seq = local_participant.get('seq')
-                    print(not isinstance(local_seq, int))
+                    
                     if not isinstance(local_seq, int):
                         continue
 
                     latest_participant = latest_participants.get(sender_key)
-                    print(not isinstance(latest_participant, dict))
                     if not isinstance(latest_participant, dict):
                         latest_participant = {}
                         latest_participants[sender_key] = latest_participant
 
-                    latest_seq = latest_participant.get('seq') if isinstance(latest_participant.get('seq'), int) else None
+                    latest_seq = latest_participant.get('seq')
+                    if not isinstance(latest_seq, int):
+                        latest_seq = None
+
                     if latest_seq is None or local_seq > latest_seq:
                         latest_participant['seq'] = local_seq
             else:
                 latest_insert_new_vault, latest_chat_vault = await get_chat_vault(username, chat_id, client, data)
-                print(isinstance(vault, dict))
-                local_seq = vault.get('seq') if isinstance(vault, dict) else None
-                print(isinstance(local_seq, int))
+                
+                local_seq = vault.get('seq')
                 if isinstance(local_seq, int):
-                    print(isinstance(latest_chat_vault.get('seq'), int))
-                    latest_seq = latest_chat_vault.get('seq') if isinstance(latest_chat_vault.get('seq'), int) else None
+                    
+                    latest_seq = latest_chat_vault.get('seq')
+                    if not isinstance(latest_seq, int):
+                        latest_seq = None
+                        
                     if latest_seq is None or local_seq > latest_seq:
                         latest_chat_vault['seq'] = local_seq
 
-            chats_vault_update(latest_chat_vault, data, username, chat_id, latest_insert_new_vault )
+            chats_vault_update(latest_chat_vault, data, username, chat_id, latest_insert_new_vault)
 
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))

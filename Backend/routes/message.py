@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from config import pepper
 from cryptography_ import encrypt_with_age, genera_chiavi, encrypt_vault, derive_signing_keys_from_age_private, calculate_message_sign
 from databaseInteractions import get_chat_chyper_keys, get_group_chyper_keys, set_user_vault
-from utils import  is_logged_in, split_message
+from utils import  is_logged_in, split_message, get_current_local_age_key, ensure_chat_seq, wait_for_public_key_message
 from telethon.tl.types import DocumentAttributeFilename
 
 router = APIRouter()
@@ -29,57 +29,17 @@ class iniz (BaseModel):
 
 async def send_public_if_not_exist(chat_id, login_session, client, chat_id_hash, data):
     chat_data = data.get('data', {}).get('chats', {}).get(chat_id_hash, {})
-    current_key = _get_current_local_age_key(chat_data)
+    current_key = get_current_local_age_key(chat_data)
     if not current_key or not current_key.get('pubblica'):
             key_response = await send_public_key(iniz(chat_id=chat_id), login_session)
-            public_key = key_response.get("public") if isinstance(key_response, dict) else None
+            public_key = key_response.get("public")
             if public_key:
                 key_visible = await wait_for_public_key_message(client, chat_id, public_key)
                 if not key_visible:
                     raise HTTPException(status_code=503, detail="Chiave non visibile in chat, riprova")
             chat_data = data.get('data', {}).get('chats', {}).get(chat_id_hash, {})
-            current_key = _get_current_local_age_key(chat_data)
+            current_key = get_current_local_age_key(chat_data)
 
-def _ensure_chat_seq(data: dict, chat_id_hash: str):
-    chats = data.setdefault('data', {}).setdefault('chats', {})
-    chat_entry = chats.get(chat_id_hash)
-    if not isinstance(chat_entry, dict):
-        chat_entry = {}
-        chats[chat_id_hash] = chat_entry
-    if not isinstance(chat_entry.get('seq'), int):
-        chat_entry['seq'] = 0
-    return chat_entry['seq']
-
-def _get_current_local_age_key(chat_entry: dict | None) -> dict:
-    if not isinstance(chat_entry, dict):
-        return {}
-
-    age_key_map = chat_entry.get('chiavi_cif', {})
-    if not isinstance(age_key_map, dict) or not age_key_map:
-        return {}
-
-    current_kid_cif = chat_entry.get('kid_cif_corrente')
-    if isinstance(current_kid_cif, str):
-        selected = age_key_map.get(current_kid_cif)
-        if isinstance(selected, dict):
-            return selected
-    return {}
-
-#verifica se la "public key" e' arrivata ai server di telegram e quindi e' valida
-async def wait_for_public_key_message(client, chat_id: int, public_key: str, timeout: float = 2.0, interval: float = 0.2) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            messages = await client.get_messages(chat_id, limit=10)
-        except Exception:
-            messages = []
-        for msg in messages or []:
-            text = getattr(msg, "message", None) or getattr(msg, "text", None) or ""
-            if '"cif"' in text and '"in"' in text and public_key in text:
-                return True
-        await asyncio.sleep(interval)
-    return False
-    
 #questa funzione si occupa di eliminare un messaggio
 @router.post("/messages/delete")
 async def delete(message: delete_m, login_session: str = Cookie(None)):
@@ -175,7 +135,7 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
             if not sign_private:
                 raise HTTPException(status_code=500, detail="Chiave di firma corrente non disponibile")
 
-            seq = _ensure_chat_seq(data, chat_id_hash) + 1
+            seq = ensure_chat_seq(data, chat_id_hash) + 1
             data['data']['chats'][chat_id_hash]['seq'] = seq
             username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
             if 'masterkey' in data['data']:
@@ -340,7 +300,7 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
         if not isinstance(kid_cif, str) or not kid_cif:
             raise HTTPException(status_code=500, detail="Chiave di cifratura corrente non disponibile")
         
-        seq = _ensure_chat_seq(data, chat_id_hash) + 1
+        seq = ensure_chat_seq(data, chat_id_hash) + 1
         data['data']['chats'][chat_id_hash]['seq'] = seq
         username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
 
@@ -459,7 +419,7 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
         data['data']['chats'] = {}
     
     chat_data = data['data']['chats'].get(chat_id_hash, {})
-    current_key = _get_current_local_age_key(chat_data)
+    current_key = get_current_local_age_key(chat_data)
     
     if current_key and current_key.get('inizio'):
         inizio_corrente = current_key.get('inizio', 0)

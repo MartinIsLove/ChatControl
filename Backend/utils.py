@@ -1,7 +1,7 @@
 from cryptography.fernet import Fernet
 from config import secret_key
 from fastapi import Cookie, HTTPException
-import time, re, base64, io, json
+import time, re, base64, io, json, asyncio
 from telethon.tl.types import DocumentAttributeAnimated
 from pydantic import BaseModel
 
@@ -187,3 +187,42 @@ def set_media(msg, message_data):
         message_data['media_type'] = 'video'
         message_data['size'] = msg.video.size if hasattr(msg.video, 'size') else 0
         message_data['mime'] = msg.video.mime_type if hasattr(msg.video, 'mime_type') else 'video/mp4'
+
+def get_current_local_age_key(chat_entry: dict | None) -> dict:
+    if not isinstance(chat_entry, dict):
+        return {}
+
+    age_key_map = chat_entry.get('chiavi_cif', {})
+    if not isinstance(age_key_map, dict) or not age_key_map:
+        return {}
+
+    current_kid_cif = chat_entry.get('kid_cif_corrente')
+    if current_kid_cif:
+        selected = age_key_map.get(current_kid_cif)
+        if isinstance(selected, dict):
+            return selected
+    return {}
+
+def ensure_chat_seq(data: dict, chat_id_hash: str):
+    chats = data.setdefault('data', {}).setdefault('chats', {})
+    chat_entry = chats.get(chat_id_hash)
+    if not isinstance(chat_entry, dict):
+        chat_entry = {}
+        chats[chat_id_hash] = chat_entry
+    if not isinstance(chat_entry.get('seq'), int):
+        chat_entry['seq'] = 0
+    return chat_entry['seq']
+
+async def wait_for_public_key_message(client, chat_id: int, public_key: str, timeout: float = 2.0, interval: float = 0.2) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            messages = await client.get_messages(chat_id, limit=10)
+        except Exception:
+            messages = []
+        for msg in messages or []:
+            text = getattr(msg, "message", None) or getattr(msg, "text", None) or ""
+            if '"cif"' in text and '"in"' in text and public_key in text:
+                return True
+        await asyncio.sleep(interval)
+    return False

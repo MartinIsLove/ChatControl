@@ -354,6 +354,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
             entity = await client.get_entity(event.chat_id)
         except:
             return 
+            
         temp_id, data = is_logged_in(login_session, False)
         me = await client.get_me()
         my_id = me.id if me else None
@@ -412,21 +413,19 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                         }
                         await broadcast_event(temp_id, event.chat_id, payload)
                         return
-
-                    user_data = login_cache.get(temp_id)
-                    if user_data:
-                        store_public_key_in_vault(
-                            user_data,
-                            event.chat_id,
-                            event.message.sender_id,
-                            public,
-                            kid=kid,
-                            kid_cif=kid_cif,
-                            pub_sign=pub_sign,
-                            msg_date=msg.get('date'),
-                            is_group=_is_group_chat_id(event.chat_id),
-                            group_title=getattr(event.chat, "title", "Gruppo")
-                        )
+  
+                    store_public_key_in_vault(
+                        data,
+                        event.chat_id,
+                        event.message.sender_id,
+                        public,
+                        kid=kid,
+                        kid_cif=kid_cif,
+                        pub_sign=pub_sign,
+                        msg_date=msg.get('date'),
+                        is_group=_is_group_chat_id(event.chat_id),
+                        group_title=getattr(event.chat, "title", "Gruppo")
+                    )
                     msg['text'] = None
                     msg['chiave'] = "Questo messaggio e' uno scambio di chiave"
                     msg['is_system'] = True
