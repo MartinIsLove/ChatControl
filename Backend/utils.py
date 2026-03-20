@@ -87,7 +87,8 @@ async def take_file_data(client, entity, msg, cif_flag: str):
             
     except Exception as e:
         raise HTTPException(status_code=500, detail= f"estrazione metadata e dati dal file fallita: {e}")
-    
+    # In caso non siano stati trovati i dati attesi, ritorniamo sempre una tupla coerente
+    return None, None
 def split_message(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
     if limit <= 0:
         raise ValueError("limit must be > 0")

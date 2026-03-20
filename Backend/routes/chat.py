@@ -9,7 +9,7 @@ from realtime import connect_socket, disconnect_socket, register_telethon_handle
 from telethon.tl.types import MessageService, MessageActionChatCreate, MessageActionChatDeleteUser, MessageActionChatAddUser, MessageActionPinMessage
 from datetime import datetime
 from fastapi.responses import StreamingResponse
-
+from messages_handler import handle_in, handle_file, handle_on, handle_message
 
 router = APIRouter()
 
@@ -44,7 +44,6 @@ def verify_signed_payload(sender_id, payload_id, payload_kid, payload_kid_cif, p
         except ValueError:
             return False, "questo messaggio e' stato modificato"
 
-#questa funzione inizializza la WebSocket per l'aggiornamento in tempo reali dei messaggi
 @router.websocket("/ws/chats/{chat_id}")
 async def chat_events(websocket: WebSocket, chat_id: int):
     login_session = websocket.cookies.get("login_session")
@@ -360,6 +359,13 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
 
     await index_messages(temp_id, chat_id, [m.get("id") for m in messages if m.get("id") is not None])
 
+    def history_verify_sig(sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, kids):
+        return verify_signed_payload(sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, chat_id, data, my_id, username, entity, chat_vault, kids)
+
+    def history_update_seq(sender_id, seq):
+        update_max_seq_in_vault(sender_id, seq)
+        return True, None
+    
     for msg in messages:
         if msg['system_type']:
             continue
@@ -377,282 +383,21 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
         
         if msg['is_json'] == True:
             cif_flag = msg['json'].get('CIF') or msg['json'].get('cif')
+
             if cif_flag == "in":            
-                if my_id and msg.get('sender_id') == my_id:
-                    msg['is_json'] = False
-                    msg['text'] = None
-                    msg['chiave'] = "Questo messaggio e' uno scambio di chiave"
-                    msg['is_system'] = True
-                    continue
-                public = msg['json'].get('public')
-                kid = msg['json'].get('kid')
-                kid_cif = msg['json'].get('kid_cif')
-                pub_sign = msg['json'].get('pub_sign')
-                if not is_valid_age_public_key(public) or any(t is None for t in (public, kid, kid_cif, pub_sign)):
-                    msg['error'] = "questo messaggio e' stato modificato"
-                    if 'json' in msg:
-                        del msg['json']
-                    msg['is_json'] = False
-                    continue
-                store_public_key_in_vault(
-                    data,
-                    chat_id,
-                    msg.get('sender_id'),
-                    public,
-                    kid=kid,
-                    kid_cif=kid_cif,
-                    pub_sign=pub_sign,
-                    msg_date=msg.get('date'),
-                    is_group=is_group_chat_id(chat_id),
-                    group_title=getattr(entity, 'title', 'Gruppo')
-                )
-                msg['text'] = None
-                msg['chiave'] = "Questo messaggio e' uno scambio di chiave"
-                msg['is_system'] = True
-                
+                await handle_in(my_id, msg, data, entity)
+                continue
             if cif_flag == "on":
-                text = msg['json'].get('text')
-                msg_decrypted_id_caption = msg['json'].get('id')
-                seq = msg['json'].get('seq')
-                kid = msg['json'].get('kid')
-                kid_cif = msg['json'].get('kid_cif') or msg['json'].get('kid_age')
-                sign = msg['json'].get('sign')
-                kids = msg['json'].get('kids')
-                
-                if  any(t is None for t in (seq, kid, kid_cif, sign, text, msg_decrypted_id_caption, kids)):
-                    msg['error'] = "questo messaggio e' stato modificato"
-                    if 'json' in msg:
-                        del msg['json']
-                    msg['is_json'] = False
-                    continue
-
-                firma, sign_error = verify_signed_payload(
-                    msg.get('sender_id'),
-                    msg_decrypted_id_caption,
-                    kid,
-                    kid_cif,
-                    seq,
-                    cif_flag,
-                    sign,
-                    chat_id,
-                    data,
-                    my_id,
-                    username,
-                    entity,
-                    chat_vault,
-                    kids,
-                )
-                if not firma:
-                    msg['error'] = sign_error
-                    if 'json' in msg:
-                        del msg['json']
-                    msg['is_json'] = False
-                    continue
-                
-                chats_data = data['data'].get('chats', {})
-                chat_keys = chats_data.get(chat_id_cif, {})
-                private = build_candidate_privates(chat_keys, kids, kid_cif=kid_cif)
-                
-                decrypted_text = decrypt_with_age(text, private)
-                
-                if decrypted_text:
-                    try:
-                        dic_mes = json.loads(decrypted_text)
-                        
-                        if dic_mes['cif'] == "on":
-                            equals = are_metadata_equals(dic_mes, msg['json'])
-
-                            if not equals:
-                                msg['error'] = "questo messaggio e' stato modificato"
-                                if 'json' in msg:
-                                    del msg['json']
-                                msg['is_json'] = False
-                                continue
-                            sender_key = str(msg.get('sender_id')) if msg.get('sender_id') is not None else "unknown"
-                            msg['_secure_seq'] = seq
-                            msg['_secure_sender_key'] = sender_key
-                            update_max_seq_in_vault(msg.get('sender_id'), seq)
-
-                            msg['text'] = dic_mes['text']
-                            msg['secure'] = True
-                            
-                            if 'json' in msg:
-                                del msg['json']
-                            msg['is_json'] = False
-                        else:
-                            msg['error'] = "questo messaggio e' stato modificato"
-                            if 'json' in msg:
-                                del msg['json']
-                            msg['is_json'] = False
-                    except Exception as e:
-                        raise HTTPException(status_code=500)
+                handle_on(msg, data, chat_id_cif, history_verify_sig, history_update_seq)
+                continue
 
             if cif_flag == "file":
-                msg['metadata_plain'], msg['encrypted_metadata'] = await take_file_data(client, entity, msg, cif_flag)
-        
-                msg_decrypted_id_caption = msg.get('metadata_plain', {}).get('id')
-                seq = msg.get('metadata_plain', {}).get('seq')
-                kid = msg.get('metadata_plain', {}).get('kid')
-                kid_cif = msg.get('metadata_plain', {}).get('kid_cif')
-                sign = msg.get('metadata_plain', {}).get('sign')
-                kids = msg.get('metadata_plain', {}).get('kids')
-
-                if  any(t is None for t in (seq, kid, kid_cif, sign, msg_decrypted_id_caption, kids)):
-                    msg['error'] = "questo messaggio e' stato modificato"
-                    if 'json' in msg:
-                        del msg['json']
-                    msg['is_json'] = False
-                    continue
-
-                firma, sign_error = verify_signed_payload(
-                    msg.get('sender_id'),
-                    msg_decrypted_id_caption,
-                    kid,
-                    kid_cif,
-                    seq,
-                    cif_flag,
-                    sign,
-                    chat_id,
-                    data,
-                    my_id,
-                    username,
-                    entity,
-                    chat_vault,
-                    kids,
-                )
-                if not firma:
-                    msg['error'] = sign_error
-                    if 'json' in msg:
-                        del msg['json']
-                    msg['is_json'] = False
-                    continue
-                
-                chats_data = data['data'].get('chats', {})
-                chat_keys = chats_data.get(chat_id_cif, {})
-                private = build_candidate_privates(chat_keys, kids, kid_cif=kid_cif)
-                if msg['encrypted_metadata']:
-                   decrypted_text = decrypt_with_age(msg['encrypted_metadata'], private)
-
-                if decrypted_text:
-                    try:
-                        dic_mes = json.loads(decrypted_text)
-                        if dic_mes['cif'] == "file":
-                            if dic_mes != msg['metadata_plain']:
-                                msg['error'] = "questo messaggio e' stato modificato"
-                                if 'json' in msg:
-                                    del msg['json']
-                                msg['is_json'] = False
-                                continue
-                            
-                            msg['file'] = True
-                            msg['filename'] = dic_mes['filename']
-                            msg['text'] = dic_mes['text']
-                            msg['mime'] = dic_mes['mime']
-                            msg['size'] = dic_mes['size']
-                            msg['secure'] = True
-                            sender_key = str(msg.get('sender_id')) if msg.get('sender_id') is not None else "unknown"
-                            msg['_secure_seq'] = seq
-                            msg['_secure_sender_key'] = sender_key
-                            update_max_seq_in_vault(msg.get('sender_id'), seq)
-
-
-                            if 'json' in msg:
-                                del msg['json']
-                            msg['is_json'] = False
-                        else:
-                            msg['error'] = "questo messaggio e' stato modificato"
-                            if 'json' in msg:
-                                del msg['json']
-                            msg['is_json'] = False
-                    except Exception as e:
-                        raise HTTPException(status_code=500, detail=f'errore gestione messaggio: {e}')
+                await handle_file(client, entity, msg, data, chat_id_cif, history_verify_sig, history_update_seq)
+                continue
 
             if cif_flag == "message":
-                try:
-                    msg['metadata_plain'],msg['encrypted_payload'] = await take_file_data(client, entity, msg, cif_flag)
-                            
-                    msg_decrypted_id_caption = msg.get('metadata_plain', {}).get('id')
-                    seq = msg.get('metadata_plain', {}).get('seq')
-                    kid = msg.get('metadata_plain', {}).get('kid')
-                    kid_cif = msg.get('metadata_plain', {}).get('kid_cif')
-                    sign = msg.get('metadata_plain', {}).get('sign')
-                    kids = msg.get('metadata_plain', {}).get('kids')
-
-                    if  any(t is None for t in (seq, kid, kid_cif, sign, msg_decrypted_id_caption, kids)):
-                        msg['error'] = "questo messaggio e' stato modificato"
-                        if 'json' in msg:
-                            del msg['json']
-                        msg['is_json'] = False
-                        continue
-
-                    firma, sign_error = verify_signed_payload(
-                        msg.get('sender_id'),
-                        msg_decrypted_id_caption,
-                        kid,
-                        kid_cif,
-                        seq,
-                        cif_flag,
-                        sign,
-                        chat_id,
-                        data,
-                        my_id,
-                        username,
-                        entity,
-                        chat_vault,
-                        kids,
-                    )
-                    if not firma:
-                        msg['error'] = sign_error
-                        if 'json' in msg:
-                            del msg['json']
-                        msg['is_json'] = False
-                        continue
-                
-                    chats_data = data['data'].get('chats', {})
-                    chat_keys = chats_data.get(chat_id_cif, {})
-                    private = build_candidate_privates(chat_keys, kids, kid_cif=kid_cif)
-
-                    decrypted_payload = decrypt_with_age(msg['encrypted_payload'], private).encode()
-                    
-                    if decrypted_payload and len(decrypted_payload) >= 4:
-                        metadata_size = int.from_bytes(decrypted_payload[:4], byteorder='big')
-                        if 0 < metadata_size <= len(decrypted_payload) - 4:
-                            inner_metadata_bytes = decrypted_payload[4:4 + metadata_size]
-                            message_bytes = decrypted_payload[4 + metadata_size:]
-                            try:
-                                inner_metadata_str = inner_metadata_bytes.decode('utf-8')
-                                inner_metadata = json.loads(inner_metadata_str)
-                            except Exception:
-                                inner_metadata = None
-
-                            if inner_metadata and inner_metadata.get('cif') == 'message':
-                                if inner_metadata != msg['metadata_plain']:
-                                    msg['error'] = "questo messaggio e' stato modificato"
-                                    if 'json' in msg:
-                                        del msg['json']
-                                    msg['is_json'] = False
-                                    continue
-
-                                msg['text'] = message_bytes.decode('utf-8', errors='replace')
-
-                                if 'json' in msg:
-                                    del msg['json']
-                                msg['is_json'] = False
-                                msg['secure'] = True
-                                msg['file'] = False
-                                msg.pop('media_type', None)
-                                msg.pop('filename', None)
-                                msg.pop('mime', None)
-                                msg.pop('size', None)
-                                sender_key = str(msg.get('sender_id')) if msg.get('sender_id') is not None else "unknown"
-                                seq_inner = inner_metadata.get('seq')
-                                
-                                msg['_secure_seq'] = seq_inner
-                                msg['_secure_sender_key'] = sender_key
-                                update_max_seq_in_vault(msg.get('sender_id'), seq_inner)
-                except Exception as e:
-                    raise HTTPException(status_code=500, detail= f"ricezione fallita: {e}")
-
+                await handle_message(client, entity, msg, data, chat_id_cif, history_verify_sig, history_update_seq)
+                continue
 
     await mark_replay_on_chunk_boundary(messages)
     mark_replay_in_history(messages)
