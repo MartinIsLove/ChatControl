@@ -1,6 +1,6 @@
 # ChatControl
 
-Pannello web per collegare un account Telegram, autenticarsi e gestire chat/messaggi in tempo reale.
+Pannello web per collegare un account Telegram, autenticarsi e gestire chat/messaggi in tempo reale in modo criptato End-To-End.
 
 ## Requisiti
 
