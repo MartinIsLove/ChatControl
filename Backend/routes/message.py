@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Cookie, HTTPException, UploadFile, File, Form
-import asyncio, time, hashlib, base64, json, tempfile, shutil, os, secrets, mimetypes, io
+import time, hashlib, base64, json, tempfile, shutil, os, secrets, mimetypes, io
 from pydantic import BaseModel
 from config import pepper
-from cryptography_ import encrypt_with_age, genera_chiavi, encrypt_vault, derive_signing_keys_from_age_private, calculate_message_sign
+from cryptography_ import encrypt_with_age, genera_chiavi, encrypt_vault, derive_signing_keys_from_age_private, calculate_message_sign, calculate_message_sign_test
 from databaseInteractions import get_chat_chyper_keys, get_group_chyper_keys, set_user_vault
 from utils import  is_logged_in, split_message, get_current_local_age_key, ensure_chat_seq, wait_for_public_key_message
 from telethon.tl.types import DocumentAttributeFilename
@@ -40,7 +40,6 @@ async def send_public_if_not_exist(chat_id, login_session, client, chat_id_hash,
             chat_data = data.get('data', {}).get('chats', {}).get(chat_id_hash, {})
             current_key = get_current_local_age_key(chat_data)
 
-#questa funzione si occupa di eliminare un messaggio
 @router.post("/messages/delete")
 async def delete(message: delete_m, login_session: str = Cookie(None)):
     _, data = is_logged_in(login_session, True)
@@ -57,7 +56,6 @@ async def delete(message: delete_m, login_session: str = Cookie(None)):
     except Exception:
         raise HTTPException(status_code=502, detail="Non hai il permesso di cancellare questo messaggio")
 
-#questa funzione invia un file, puo' inviarlo sia cifrato che non
 @router.post("/messages/send/file")
 async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = Form(False),group: bool = Form(False), file: UploadFile = File(...),login_session: str = Cookie(None)):
     _, data = is_logged_in(login_session, True)
@@ -248,12 +246,11 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
         
-#questa funzione invia un messaggio normale o cifrato
 @router.post("/messages/send")
 async def s_message( credentials: message, login_session: str = Cookie(None)):
     _, data = is_logged_in(login_session, True)
     client = data['client']
-
+    print(data)
     if not client.is_connected():
         await client.connect()
 
@@ -317,7 +314,7 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
         if not sign_private:
             raise HTTPException(status_code=500, detail="Chiave di firma corrente non disponibile")
 
-        sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_messagge, "on", kids)
+        sign = calculate_message_sign_test(sign_private, seq, kid, kid_cif, id_messagge, "on", kids, credentials.text)
 
         da_cifrare ={
             "cif" : "on",
@@ -349,11 +346,8 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
         if text_cyp is None:
             raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
         
-        #questa parte controlla che il messaggio sia entro i limiti di splittamento di telegram
-        #ovvero 4096 caratteri, nel caso positivo gestisce l'invio del messaggio come file,
-        #per evitare splittamenti
         if len(json.dumps(finale)) > MESSAGE_LIMIT:
-            sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_messagge, "message", kids)
+            sign = calculate_message_sign_test(sign_private, seq, kid, kid_cif, id_messagge, "message", kids, credentials.text)
             token = secrets.token_hex(8)
             nome_file = token + ".dat"
             message_bytes = credentials.text.encode("utf-8")
@@ -375,7 +369,6 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
             if encrypted_metadata is None:
                 raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
 
-
             file_in_ram = io.BytesIO(payload)
             file_in_ram.name = nome_file
 
@@ -396,8 +389,6 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
             except Exception as e:
                 raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
             
-        
-        
         try:
             await client.send_message(credentials.chat_id, json.dumps(finale))
         except Exception as e:

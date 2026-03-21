@@ -5,8 +5,6 @@ from utils import is_group_chat_id
 from cryptography_ import derivate_master_key, decrypt_vault, encrypt_vault
 from config import pepper
 
-#questa funzione prende i dati dell'utente (vault e salt) e li decifra prendendo in input lo 
-#username dell'utente passato in una funzione di hash e la sua password(in versione passphrase)
 def get_user_informations(username: str, password: str):
     try:
         with db_lock, get_connection() as conn:
@@ -35,7 +33,6 @@ def get_user_informations(username: str, password: str):
     
     return vault_decyphered, master_key
 
-#la funzione che si occupa di modificare il vault di un utente dato in input
 def set_user_vault(username: str, vault_ciphered: bytes):
     try:
         with db_lock, get_connection() as conn:
@@ -59,7 +56,7 @@ def add_user(temp_data, vault_ciphered):
             conn.commit()
     except sqlite3.Error as error:
         raise HTTPException(status_code=500, detail=str(error))
-#verifica l'unicita' dello username
+
 def check_username_unicity(username: str):
     try:
         with db_lock, get_connection() as conn:
@@ -75,7 +72,6 @@ def check_username_unicity(username: str):
     except sqlite3.Error as error:
         raise HTTPException(status_code=500, detail=str(error))
 
-#prende il vault dei partecipanti al gruppo
 def get_gruppo_vault(username: str, chat_id: str, entity, data):
     chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
 
@@ -98,7 +94,6 @@ def get_gruppo_vault(username: str, chat_id: str, entity, data):
             insert_new_vault = False
     return insert_new_vault, vault_deciphered
                 
-#prende il vault di una chat
 async def get_chat_vault(username: str, chat_id: str, client, data):
     chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
 
@@ -124,26 +119,19 @@ async def get_chat_vault(username: str, chat_id: str, client, data):
     return insert_new_vault, vault_deciphered
 
 def store_public_key_in_vault(
-    user_data,
+    user_data: dict,
     chat_id: int,
-    sender_id,
+    sender_id: int,
     public_key: str,
     kid: str | None = None,
     kid_cif: str | None = None,
     pub_sign: str | None = None,
-    msg_date=None,
     is_group: bool | None = None,
     group_title: str | None = None,
     sender_username: str | None = None,
 ):
-    if not user_data or not public_key or str(user_data['data'].get('user_id')) == str(sender_id):
+    if str(user_data['data'].get('user_id')) == str(sender_id):
         return False
-
-    if is_group is None:
-        try:
-            is_group = int(chat_id) < 0
-        except Exception:
-            is_group = False
 
     username = hashlib.sha256(pepper.encode() + user_data['data']['username'].encode()).hexdigest()
     chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()

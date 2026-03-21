@@ -1,12 +1,11 @@
-import asyncio, base64, subprocess, tempfile, hashlib, sqlite3, json, io, os
-from fastapi import WebSocket, HTTPException
+import asyncio, hashlib, sqlite3, json
+from fastapi import WebSocket
 from telethon import events, utils
 from telethon.tl.types import PeerChannel, UpdateDeleteChannelMessages, UpdateDeleteMessages
 from config import pepper
 from database.sqlite import get_connection, db_lock
-from cryptography_ import decrypt_with_age, decrypt_vault, decrypt_vault, verify_message_sign, calculate_message_sign, encrypt_vault
-from databaseInteractions import store_public_key_in_vault
-from utils import  login_cache, is_valid_age_public_key, set_media, is_logged_in, build_candidate_privates, take_file_data, are_metadata_equals
+from cryptography_ import  decrypt_vault, decrypt_vault, verify_message_sign, calculate_message_sign, encrypt_vault
+from utils import  login_cache, set_media, is_logged_in
 from messages_handler import handle_in, handle_message, handle_file, handle_on
 
 _active_connections = {}

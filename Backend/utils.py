@@ -87,8 +87,8 @@ async def take_file_data(client, entity, msg, cif_flag: str):
             
     except Exception as e:
         raise HTTPException(status_code=500, detail= f"estrazione metadata e dati dal file fallita: {e}")
-    # In caso non siano stati trovati i dati attesi, ritorniamo sempre una tupla coerente
     return None, None
+
 def split_message(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
     if limit <= 0:
         raise ValueError("limit must be > 0")
@@ -134,18 +134,15 @@ def build_candidate_privates(chat_keys: dict, kids, kid_cif: str | None = None):
 
     return selected_key
 
-#questa funzione ritorna se la conversazione è un gruppo oppure no
 def is_group_chat_id(chat_id: int) -> bool:
     try:
         return int(chat_id) < 0
     except Exception:
         return False
     
-#questa funzione gestisce i media per renderli comprensibili al frontend
 def set_media(msg, message_data):
     message_data['file'] = True
             
-    # Controlla PRIMA sticker e gif (altrimenti finiscono come documenti)
     if msg.sticker:
         document = msg.sticker
         is_animated = any(
@@ -165,7 +162,6 @@ def set_media(msg, message_data):
         message_data['size'] = msg.gif.size
         message_data['mime'] = msg.gif.mime_type or 'video/mp4'
     
-    # Documenti generici
     elif msg.document:
         document = msg.document
         message_data['media_type'] = 'document'
@@ -178,12 +174,10 @@ def set_media(msg, message_data):
                 message_data['filename'] = attr.file_name
                 break
     
-    # Foto
     elif msg.photo:
         message_data['media_type'] = 'photo'
         message_data['size'] = msg.photo.size if hasattr(msg.photo, 'size') else 0
     
-    # Video
     elif msg.video:
         message_data['media_type'] = 'video'
         message_data['size'] = msg.video.size if hasattr(msg.video, 'size') else 0

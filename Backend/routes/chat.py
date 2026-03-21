@@ -1,19 +1,18 @@
 from fastapi import APIRouter, Cookie, WebSocket, WebSocketDisconnect, HTTPException
-import sqlite3, hashlib, json, base64, subprocess, tempfile, io, os, mimetypes
+import sqlite3, hashlib, json, base64, io, os, mimetypes
 from database.sqlite import get_connection, db_lock
 from config import pepper
 from databaseInteractions import store_public_key_in_vault, get_gruppo_vault, get_chat_vault, chats_vault_update
-from cryptography_ import  verify_message_sign, calculate_message_sign, decrypt_with_age
-from utils import is_logged_in, are_metadata_equals, is_valid_age_public_key, is_group_chat_id, build_candidate_privates, set_media, take_file_data
+from cryptography_ import  verify_message_sign, verify_message_sign_test , calculate_message_sign, decrypt_with_age, calculate_message_sign_test
+from utils import is_logged_in, is_valid_age_public_key, is_group_chat_id, build_candidate_privates, set_media
 from realtime import connect_socket, disconnect_socket, register_telethon_handlers, index_messages
 from telethon.tl.types import MessageService, MessageActionChatCreate, MessageActionChatDeleteUser, MessageActionChatAddUser, MessageActionPinMessage
-from datetime import datetime
 from fastapi.responses import StreamingResponse
 from messages_handler import handle_in, handle_file, handle_on, handle_message
 
 router = APIRouter()
 
-def verify_signed_payload(sender_id, payload_id, payload_kid, payload_kid_cif, payload_seq, payload_cif, payload_sign, chat_id, data, my_id, username, entity, chat_vault, kids ):
+def verify_signed_payload(sender_id, payload_id, payload_kid, payload_kid_cif, payload_seq, payload_cif, payload_sign, chat_id, data, my_id, chat_vault, kids, text ):
         chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
         if my_id and sender_id == my_id:
             local_kid_map = data.get('data', {}).get('chats', {}).get(chat_id_cif, {}).get('kid', {})
@@ -21,7 +20,7 @@ def verify_signed_payload(sender_id, payload_id, payload_kid, payload_kid_cif, p
             if not sign_private:
                 return False, "chiave di firma locale non disponibile"
             try:
-                expected_sign = calculate_message_sign(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, kids)
+                expected_sign = calculate_message_sign_test(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, kids, text)
             except ValueError:
                 return False, "questo messaggio e' stato modificato"
             return (payload_sign == expected_sign), "questo messaggio e' stato modificato"
@@ -40,7 +39,7 @@ def verify_signed_payload(sender_id, payload_id, payload_kid, payload_kid_cif, p
 
         pub_sign = signing_keys.get(payload_kid)
         try:
-            return verify_message_sign(pub_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, payload_sign, kids), "questo messaggio e' stato modificato"
+            return verify_message_sign_test(pub_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, payload_sign, kids, text), "questo messaggio e' stato modificato"
         except ValueError:
             return False, "questo messaggio e' stato modificato"
 
@@ -272,9 +271,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
 
     def update_max_seq_in_vault(sender_id, seq_value):
         nonlocal seq_dirty
-        if not isinstance(seq_value, int):
-            return
-
+        
         if is_group_chat_id(chat_id):
             sender_key = str(sender_id)
             participant_data = vault.get(sender_key)
@@ -359,8 +356,8 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
 
     await index_messages(temp_id, chat_id, [m.get("id") for m in messages if m.get("id") is not None])
 
-    def history_verify_sig(sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, kids):
-        return verify_signed_payload(sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, chat_id, data, my_id, username, entity, chat_vault, kids)
+    def history_verify_sig(sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, kids, text):
+        return verify_signed_payload(sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, chat_id, data, my_id, chat_vault, kids, text)
 
     def history_update_seq(sender_id, seq):
         update_max_seq_in_vault(sender_id, seq)
@@ -500,7 +497,6 @@ async def get_init_messages(chat_id: int, login_session: str = Cookie(None)):
             kid=kid,
             kid_cif=kid_cif,
             pub_sign=pub_sign,
-            msg_date=msg.date,
             is_group=is_group,
             group_title=getattr(entity, 'title', 'Gruppo')
         )
@@ -687,8 +683,6 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
                     chat_id,
                     data,
                     my_id,
-                    username,
-                    entity,
                     chat_vault,
                     kids,
                 )

@@ -28,7 +28,6 @@ async def handle_in(my_id, msg, data, entity):
         kid=kid,
         kid_cif=kid_cif,
         pub_sign=pub_sign,
-        msg_date=msg.get('date'),
         is_group=is_group_chat_id(chat_id),
         group_title=getattr(entity, 'title', 'Gruppo')
     )
@@ -54,13 +53,6 @@ def handle_on(msg: dict, data: dict, chat_id_cif: str, verify_sig_cb, update_seq
         msg['is_json'] = False
         return
 
-    firma, sign_error = verify_sig_cb(msg.get('sender_id'), msg_decrypted_id_caption, kid, kid_cif, seq, "on", sign, kids)
-    if not firma:
-        msg['error'] = sign_error
-        msg.pop('json', None)
-        msg['is_json'] = False
-        return
-
     chats_data = data.get('data', {}).get('chats', {})
     chat_keys = chats_data.get(chat_id_cif, {})
     private = build_candidate_privates(chat_keys, kids, kid_cif=kid_cif)
@@ -74,6 +66,13 @@ def handle_on(msg: dict, data: dict, chat_id_cif: str, verify_sig_cb, update_seq
 
     try:
         dic_mes = json.loads(decrypted_text)
+        firma, sign_error = verify_sig_cb(msg.get('sender_id'), msg_decrypted_id_caption, kid, kid_cif, seq, "on", sign, kids, dic_mes.get('text'))
+        if not firma:
+            msg['error'] = sign_error
+            msg.pop('json', None)
+            msg['is_json'] = False
+            return
+
         if dic_mes.get('cif') != "on" or not are_metadata_equals(dic_mes, msg['json']):
             msg['error'] = "questo messaggio e' stato modificato"
             msg.pop('json', None)
@@ -201,13 +200,6 @@ async def handle_message(client, entity, msg: dict, data: dict, chat_id_cif: str
         msg['is_json'] = False
         return
 
-    firma, sign_error = verify_sig_cb(msg.get('sender_id'), msg_decrypted_id_caption, kid, kid_cif, seq, "message", sign, kids)
-    if not firma:
-        msg['error'] = sign_error
-        msg.pop('json', None)
-        msg['is_json'] = False
-        return
-
     chats_data = data.get('data', {}).get('chats', {})
     chat_keys = chats_data.get(chat_id_cif, {})
     private = build_candidate_privates(chat_keys, kids, kid_cif=kid_cif)
@@ -227,6 +219,14 @@ async def handle_message(client, entity, msg: dict, data: dict, chat_id_cif: str
         if 0 < metadata_size <= len(decrypted_payload) - 4:
             inner_metadata_bytes = decrypted_payload[4:4 + metadata_size]
             message_bytes = decrypted_payload[4 + metadata_size:]
+
+            firma, sign_error = verify_sig_cb(msg.get('sender_id'), msg_decrypted_id_caption, kid, kid_cif, seq, "message", sign, kids, message_bytes.decode('utf-8', errors='replace'))
+            if not firma:
+                msg['error'] = sign_error
+                msg.pop('json', None)
+                msg['is_json'] = False
+                return
+
             try:
                 inner_metadata_str = inner_metadata_bytes.decode('utf-8')
                 inner_metadata = json.loads(inner_metadata_str)

@@ -1,22 +1,21 @@
-import subprocess, base64, json, os, tempfile, hashlib
+import subprocess, base64, json, os, tempfile
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, PublicFormat, NoEncryption
 from cryptography.fernet import Fernet
 
-def _b64url(data: bytes) -> str:
+def _b64url(data: bytes):
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
 
-def _b64url_decode(data: str) -> bytes:
+def _b64url_decode(data: str):
     padding = (-len(data)) % 4
     return base64.urlsafe_b64decode(data + ("=" * padding))
         
-def derive_signing_keys_from_age_private(age_private_key: str) -> dict[str, str]:
+def derive_signing_keys_from_age_private(age_private_key: str):
     
     normalized = (age_private_key or "").strip()
     if not normalized:
@@ -24,7 +23,6 @@ def derive_signing_keys_from_age_private(age_private_key: str) -> dict[str, str]
     if not normalized.startswith("AGE-SECRET-KEY-1"):
         raise ValueError("Formato chiave privata age non valido")
 
-    # HKDF evita uso diretto della stringa come seed della chiave Ed25519.
     seed = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
@@ -55,7 +53,7 @@ def derive_signing_keys_from_age_private(age_private_key: str) -> dict[str, str]
         "kid": _b64url(kid),
     }
 
-def calculate_message_sign(private_key_b64url: str, seq: int, kid: str, kid_cif: str, message_id: str, cif: str, kids: list) -> str:
+def calculate_message_sign(private_key_b64url: str, seq: int, kid: str, kid_cif: str, message_id: str, cif: str, kids: list):
    
     try:
         private_key_raw = _b64url_decode(private_key_b64url.strip())
@@ -80,6 +78,38 @@ def calculate_message_sign(private_key_b64url: str, seq: int, kid: str, kid_cif:
     signer = Ed25519PrivateKey.from_private_bytes(private_key_raw)
     signature = signer.sign(payload_bytes)
     return _b64url(signature)
+
+
+def calculate_message_sign_test(private_key_b64url: str, seq: int, kid: str, kid_cif: str, message_id: str, cif: str, kids: list, text: str):
+   
+    try:
+        private_key_raw = _b64url_decode(private_key_b64url.strip())
+    except Exception as exc:
+        raise ValueError("Formato chiave privata di firma non valido") from exc
+
+    if len(private_key_raw) != 32:
+        raise ValueError("La chiave privata di firma deve essere lunga 32 byte")
+
+    sanitized_kids = [str(k).strip() for k in kids] if kids else[]
+
+    payload = {
+        "seq": seq,
+        "kid": kid.strip(),
+        "kid_cif": kid_cif.strip(),
+        "id": message_id.strip(),
+        "cif": cif.strip(),
+        "kids": sanitized_kids,
+        "text": text
+    }
+    payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+    signer = Ed25519PrivateKey.from_private_bytes(private_key_raw)
+    signature = signer.sign(payload_bytes)
+    return _b64url(signature)
+
+
+
+
 
 def verify_message_sign(
         
@@ -126,6 +156,59 @@ def verify_message_sign(
     except InvalidSignature:
         return False
     
+
+
+
+def verify_message_sign_test(
+        
+    public_key_b64url: str,
+    seq: int,
+    kid: str,
+    kid_cif: str,
+    message_id: str,
+    cif: str,
+    signature_b64url: str,
+    kids: list,
+    text: str,
+) -> bool:
+   
+    try:
+        public_key_raw = _b64url_decode(public_key_b64url.strip())
+    except Exception as exc:
+        raise ValueError("Formato chiave pubblica di firma non valido") from exc
+
+    if len(public_key_raw) != 32:
+        raise ValueError("La chiave pubblica di firma deve essere lunga 32 byte")
+
+    try:
+        signature_raw = _b64url_decode(signature_b64url.strip())
+    except Exception:
+        return False
+
+    sanitized_kids = [str(k).strip() for k in kids] if kids else[]
+
+
+    payload = {
+        "seq": seq,
+        "kid": kid.strip(),
+        "kid_cif": kid_cif.strip(),
+        "id": message_id.strip(),
+        "cif": cif.strip(),
+        "kids": sanitized_kids,
+        "text": text
+    }
+    payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+    verifier = Ed25519PublicKey.from_public_bytes(public_key_raw)
+    try:
+        verifier.verify(signature_raw, payload_bytes)
+        return True
+    except InvalidSignature:
+        return False
+
+
+
+
 def derivate_master_key(passphrase: str, salt: bytes):
     kdf = Argon2id(salt=salt, length=32, iterations=2, memory_cost=65536, lanes=4)
     raw_key = kdf.derive(passphrase.encode())
