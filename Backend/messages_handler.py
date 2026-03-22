@@ -55,7 +55,7 @@ def handle_on(msg: dict, data: dict, chat_id_cif: str, verify_sig_cb, update_seq
 
     chats_data = data.get('data', {}).get('chats', {})
     chat_keys = chats_data.get(chat_id_cif, {})
-    private = build_candidate_privates(chat_keys, kids, kid_cif=kid_cif)
+    private = build_candidate_privates(chat_keys, kids)
 
     decrypted_text = decrypt_with_age(text, private)
     if not decrypted_text:
@@ -99,55 +99,59 @@ def handle_on(msg: dict, data: dict, chat_id_cif: str, verify_sig_cb, update_seq
         msg['is_json'] = False
 
 async def handle_file(client, entity, msg: dict, data: dict, chat_id_cif: str, verify_sig_cb, update_seq_cb):
-    msg['metadata_plain'], msg['encrypted_metadata'] = await take_file_data(client, entity, msg, "file")
+    msg['metadata_plain'], _ = await take_file_data(client, entity, msg, "file")
 
-    if not msg.get('metadata_plain') and not msg.get('encrypted_metadata'):
-        msg['error'] = "Il download del messaggio non è andato a buon fine"
+    if not msg.get('metadata_plain'):
+        msg['error'] = "Il download dei metadati non è andato a buon fine"
         msg.pop('json', None)
         msg['is_json'] = False
         return
 
-    msg_decrypted_id_caption = msg.get('metadata_plain', {}).get('id')
-    seq = msg.get('metadata_plain', {}).get('seq')
-    kid = msg.get('metadata_plain', {}).get('kid')
-    kid_cif = msg.get('metadata_plain', {}).get('kid_cif')
-    sign = msg.get('metadata_plain', {}).get('sign')
-    kids = msg.get('metadata_plain', {}).get('kids')
+    metadata_plain = msg['metadata_plain']
+    msg_id = metadata_plain.get('id')
+    seq = metadata_plain.get('seq')
+    kid = metadata_plain.get('kid')
+    kid_cif = metadata_plain.get('kid_cif')
+    sign = metadata_plain.get('sign')
+    kids = metadata_plain.get('kids')
+    
+    encrypted_inner_metadata = metadata_plain.get('text')
 
-    if any(t is None for t in (seq, kid, kid_cif, sign, msg_decrypted_id_caption, kids)):
-        msg['error'] = "questo messaggio e' stato modificato"
-        msg.pop('json', None)
-        msg['is_json'] = False
-        return
-
-    firma, sign_error = verify_sig_cb(msg.get('sender_id'), msg_decrypted_id_caption, kid, kid_cif, seq, "file", sign, kids)
-    if not firma:
-        msg['error'] = sign_error
+    if any(t is None for t in (seq, kid, kid_cif, sign, msg_id, kids, encrypted_inner_metadata)):
+        msg['error'] = "metadati mancanti o incompleti"
         msg.pop('json', None)
         msg['is_json'] = False
         return
 
     chats_data = data.get('data', {}).get('chats', {})
     chat_keys = chats_data.get(chat_id_cif, {})
-    private = build_candidate_privates(chat_keys, kids, kid_cif=kid_cif)
+    private = build_candidate_privates(chat_keys, kids)
 
-    if not msg.get('encrypted_metadata'):
-        msg['error'] = "metadati cifrati mancanti"
-        msg.pop('json', None)
-        msg['is_json'] = False
-        return
-
-    decrypted_text = decrypt_with_age(msg['encrypted_metadata'], private)
+    decrypted_text = decrypt_with_age(encrypted_inner_metadata, private)
     if not decrypted_text:
         msg['error'] = "impossibile decifrare i metadati"
         msg.pop('json', None)
         msg['is_json'] = False
         return
-
+    
     try:
         dic_mes = json.loads(decrypted_text)
-        if dic_mes.get('cif') != "file" or dic_mes != msg['metadata_plain']:
-            msg['error'] = "questo messaggio e' stato modificato"
+
+        if (dic_mes.get('cif') != "file" or 
+            dic_mes.get('id') != msg_id or 
+            dic_mes.get('seq') != seq or 
+            dic_mes.get('kid') != kid or 
+            dic_mes.get('sign') != sign):
+            
+            msg['error'] = "questo messaggio e' stato modificato (incongruenza nei metadati)"
+            msg.pop('json', None)
+            msg['is_json'] = False
+            return
+
+
+        firma, sign_error = verify_sig_cb(msg.get('sender_id'), msg_id, kid, kid_cif, seq, "file", sign, kids, dic_mes.get('text'))
+        if not firma:
+            msg['error'] = sign_error
             msg.pop('json', None)
             msg['is_json'] = False
             return
@@ -160,10 +164,11 @@ async def handle_file(client, entity, msg: dict, data: dict, chat_id_cif: str, v
             return
 
         msg['file'] = True
-        msg['filename'] = dic_mes['filename']
-        msg['text'] = dic_mes['text']
-        msg['mime'] = dic_mes['mime']
-        msg['size'] = dic_mes['size']
+        msg['filename'] = dic_mes.get('filename')
+        msg['text'] = dic_mes.get('text')  
+        msg['mime'] = dic_mes.get('mime')
+        msg['size'] = dic_mes.get('size')
+        
         msg['secure'] = True
         msg['_secure_seq'] = seq
         msg['_secure_sender_key'] = str(msg.get('sender_id')) if msg.get('sender_id') is not None else "unknown"
@@ -174,7 +179,7 @@ async def handle_file(client, entity, msg: dict, data: dict, chat_id_cif: str, v
         msg['is_json'] = False
 
     except Exception:
-        msg['error'] = "errore nella lettura del file"
+        msg['error'] = "errore nella lettura dei metadati del file"
         msg.pop('json', None)
         msg['is_json'] = False
 
@@ -202,7 +207,7 @@ async def handle_message(client, entity, msg: dict, data: dict, chat_id_cif: str
 
     chats_data = data.get('data', {}).get('chats', {})
     chat_keys = chats_data.get(chat_id_cif, {})
-    private = build_candidate_privates(chat_keys, kids, kid_cif=kid_cif)
+    private = build_candidate_privates(chat_keys, kids)
 
     decrypted_payload = decrypt_with_age(msg['encrypted_payload'], private, False)
     if not decrypted_payload:

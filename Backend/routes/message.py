@@ -2,16 +2,14 @@ from fastapi import APIRouter, Cookie, HTTPException, UploadFile, File, Form
 import time, hashlib, base64, json, tempfile, shutil, os, secrets, mimetypes, io
 from pydantic import BaseModel
 from config import pepper
-from cryptography_ import encrypt_with_age, genera_chiavi, encrypt_vault, derive_signing_keys_from_age_private, calculate_message_sign, calculate_message_sign_test
+from cryptography_ import encrypt_with_age, genera_chiavi, encrypt_vault, derive_signing_keys_from_age_private, calculate_message_sign
 from databaseInteractions import get_chat_chyper_keys, get_group_chyper_keys, set_user_vault
 from utils import  is_logged_in, split_message, get_current_local_age_key, ensure_chat_seq, wait_for_public_key_message
 from telethon.tl.types import DocumentAttributeFilename
 
 router = APIRouter()
 
-CAPTION_LIMIT = 1024
 MESSAGE_LIMIT = 4096
-MIN_UPLOAD_BPS = 32 * 1024
 PUBLIC_KEY_COOLDOWN = 0
 
 class message (BaseModel):
@@ -127,12 +125,6 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
             kid_cif = chat_entry.get('kid_cif_corrente')
             sign_private = chat_entry.get('kid', {}).get(kid) if kid else None
 
-            if not isinstance(kid_cif, str) or not kid_cif:
-                raise HTTPException(status_code=500, detail="Chiave di cifratura corrente non disponibile")
-
-            if not sign_private:
-                raise HTTPException(status_code=500, detail="Chiave di firma corrente non disponibile")
-
             seq = ensure_chat_seq(data, chat_id_hash) + 1
             data['data']['chats'][chat_id_hash]['seq'] = seq
             username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
@@ -146,9 +138,11 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
                 
             set_user_vault(username, vault_ciphered)
 
-            sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_mess, "file", kids)
+            sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_mess, "file", kids, text)
 
-            metadata = {
+            file_sign = calculate_message_sign(sign_private, file=file_content)
+
+            inner_metadata = {
                 "filename": file.filename,
                 "cif": "file",
                 "text": text,
@@ -160,32 +154,40 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
                 "seq": seq,
                 "sign": sign,
                 "kids": kids,
+                "file_sign": file_sign
             }
+
+            json_inner_metadata = json.dumps(inner_metadata, sort_keys=True)
+            testo_cifrato = encrypt_with_age(json_inner_metadata, recipient_keys)
+
+            if testo_cifrato is None:
+                raise HTTPException(status_code=500, detail="Errore durante la cifratura dei metadati con age")
+
+            metadata = {
+                "cif": "file",
+                "text": testo_cifrato,
+                "id": id_mess,
+                "kid": kid,
+                "kid_cif": kid_cif,
+                "seq": seq,
+                "sign": sign,
+                "kids": kids,
+            }
+
 
             json_metadata = json.dumps(metadata, sort_keys=True)
             metadata_bytes = json_metadata.encode('utf-8')
             metadata_size = len(metadata_bytes)
 
-            encrypted_metadata = encrypt_with_age(metadata_bytes, recipient_keys)
-            if encrypted_metadata is None:
-                raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
-
-            # cifro solo il metadata separatamente (già fatto) e cifro solo il file
             encrypted_file = encrypt_with_age(file_content, recipient_keys)
             if encrypted_file is None:
                 raise HTTPException(status_code=500, detail="Errore durante la cifratura del file con age")
 
-            if isinstance(encrypted_metadata, str):
-                encrypted_metadata = encrypted_metadata.encode('utf-8')
-            if isinstance(encrypted_file, str):
-                encrypted_file = encrypted_file.encode('utf-8')
+            encrypted_file = encrypted_file.encode('utf-8')
 
-            # payload: [len(metadata_plain:4)] [metadata_plain] [len(encrypted_metadata:4)] [encrypted_metadata] [encrypted_file]
             payload = (
                 metadata_size.to_bytes(4, byteorder='big')
                 + metadata_bytes
-                + len(encrypted_metadata).to_bytes(4, byteorder='big')
-                + encrypted_metadata
                 + encrypted_file
             )
 
@@ -195,7 +197,6 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
                 "cif":"file",
             }
 
-            # Salva il file cifrato con nome = token
             with tempfile.NamedTemporaryFile(delete=False, suffix=".dat") as tmp:
                 if isinstance(encrypted_payload, str):
                     tmp.write(encrypted_payload.encode('utf-8'))
@@ -203,83 +204,68 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
                     tmp.write(encrypted_payload)
                 tmp_path = tmp.name
             
-            # Invia il file tramite Telethon
-
             caption_str = json.dumps(caption)
 
-            if len(caption_str) <= CAPTION_LIMIT:
-                start_time = time.monotonic()
-
-                async def progress_cb(current, total):
-                    elapsed = time.monotonic() - start_time
-                    if elapsed >= 1.0 and (current / max(elapsed, 0.001)) < MIN_UPLOAD_BPS:
-                        raise Exception("Connessione troppo lenta")
-
-                sent_msg = None
-                try:
-                    sent_msg = await client.send_file(
-                        chat_id,
-                        tmp_path,
-                        caption=caption_str,
-                        force_document=True,
-                        attributes=[DocumentAttributeFilename(nome_file)],
-                        progress_callback=progress_cb
-                    )
-                finally:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-
-                sent_id = None
-                try:
-                    sent_id = getattr(sent_msg, 'id', None)
-                except Exception:
-                    sent_id = None
-
-                return {"status": "ok", "message_id": sent_id}
-            else:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"caption troppo lunga ({len(caption_str)}>{CAPTION_LIMIT})"
+            sent_msg = None
+            try:
+                sent_msg = await client.send_file(
+                    chat_id,
+                    tmp_path,
+                    caption=caption_str,
+                    force_document=True,
+                    attributes=[DocumentAttributeFilename(nome_file)],
                 )
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
+            sent_id = None
+            try:
+                sent_id = getattr(sent_msg, 'id', None)
+            except Exception:
+                sent_id = None
+
+            return {"status": "ok", "message_id": sent_id}
+
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
         
 @router.post("/messages/send")
-async def s_message( credentials: message, login_session: str = Cookie(None)):
+async def s_message( message: message, login_session: str = Cookie(None)):
     _, data = is_logged_in(login_session, True)
     client = data['client']
     print(data)
     if not client.is_connected():
         await client.connect()
 
-    if not credentials.cryph:
+    if not message.cryph:
         try:
-            if len(credentials.text)>4096:
-                splitted_text = split_message(credentials.text)
+            if len(message.text)>4096:
+                splitted_text = split_message(message.text)
                 for text in splitted_text:
-                    await client.send_message(credentials.chat_id, text)
+                    await client.send_message(message.chat_id, text)
             else:
-                await client.send_message(credentials.chat_id, credentials.text)
+                await client.send_message(message.chat_id, message.text)
 
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
         
     else:
         id_messagge = secrets.token_hex(16)
-        chat_id_hash = hashlib.sha256(pepper.encode() + str(credentials.chat_id).encode()).hexdigest()        
+        chat_id_hash = hashlib.sha256(pepper.encode() + str(message.chat_id).encode()).hexdigest()        
 
-        await send_public_if_not_exist(credentials.chat_id, login_session, client, chat_id_hash, data)
+        await send_public_if_not_exist(message.chat_id, login_session, client, chat_id_hash, data)
         
-        if credentials.group:
+        if message.group:
             
-            keys = get_group_chyper_keys(data, credentials.chat_id)
+            keys = get_group_chyper_keys(data, message.chat_id)
 
             
         else:
             
-            keys = get_chat_chyper_keys(data, credentials.chat_id)
+            keys = get_chat_chyper_keys(data, message.chat_id)
         
         kids = []
         recipient_keys = []
@@ -314,11 +300,11 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
         if not sign_private:
             raise HTTPException(status_code=500, detail="Chiave di firma corrente non disponibile")
 
-        sign = calculate_message_sign_test(sign_private, seq, kid, kid_cif, id_messagge, "on", kids, credentials.text)
+        sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_messagge, "on", kids, message.text)
 
         da_cifrare ={
             "cif" : "on",
-            "text" : credentials.text,
+            "text" : message.text,
             "id": id_messagge,
             "kid": kid,
             "kid_cif": kid_cif,
@@ -347,10 +333,10 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
             raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
         
         if len(json.dumps(finale)) > MESSAGE_LIMIT:
-            sign = calculate_message_sign_test(sign_private, seq, kid, kid_cif, id_messagge, "message", kids, credentials.text)
+            sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_messagge, "message", kids, message.text)
             token = secrets.token_hex(8)
             nome_file = token + ".dat"
-            message_bytes = credentials.text.encode("utf-8")
+            message_bytes = message.text.encode("utf-8")
             message_metadata = {
                 "cif": "message",
                 "kids": kids,
@@ -379,7 +365,7 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
             try:
                 file_in_ram.seek(0)
                 await client.send_file(
-                    credentials.chat_id,
+                    message.chat_id,
                     file_in_ram,
                     caption=json.dumps(caption),
                     force_document=True,
@@ -390,12 +376,11 @@ async def s_message( credentials: message, login_session: str = Cookie(None)):
                 raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
             
         try:
-            await client.send_message(credentials.chat_id, json.dumps(finale))
+            await client.send_message(message.chat_id, json.dumps(finale))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
     return {"status":"ok"}
 
-#questa funzione invia la chiave pubblica alla chat designata
 @router.post("/messages/initializing")
 async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
     _, data = is_logged_in(login_session, True)

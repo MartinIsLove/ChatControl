@@ -53,7 +53,7 @@ def derive_signing_keys_from_age_private(age_private_key: str):
         "kid": _b64url(kid),
     }
 
-def calculate_message_sign(private_key_b64url: str, seq: int, kid: str, kid_cif: str, message_id: str, cif: str, kids: list):
+def calculate_message_sign(private_key_b64url: str, seq = None, kid = None, kid_cif = None, message_id = None, cif = None, kids = None, text = None, file = None):
    
     try:
         private_key_raw = _b64url_decode(private_key_b64url.strip())
@@ -63,64 +63,38 @@ def calculate_message_sign(private_key_b64url: str, seq: int, kid: str, kid_cif:
     if len(private_key_raw) != 32:
         raise ValueError("La chiave privata di firma deve essere lunga 32 byte")
 
-    sanitized_kids = [str(k).strip() for k in kids] if kids else[]
+    if file is not None:
+        payload = {"file": _b64url(file)}
+    else:
+        sanitized_kids = [str(k).strip() for k in kids] if kids else[]
 
-    payload = {
-        "seq": seq,
-        "kid": kid.strip(),
-        "kid_cif": kid_cif.strip(),
-        "id": message_id.strip(),
-        "cif": cif.strip(),
-        "kids": sanitized_kids
-    }
+        payload = {
+            "seq": seq,
+            "kid": kid.strip(),
+            "kid_cif": kid_cif.strip(),
+            "id": message_id.strip(),
+            "cif": cif.strip(),
+            "kids": sanitized_kids,
+            "text": text
+        }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
     signer = Ed25519PrivateKey.from_private_bytes(private_key_raw)
     signature = signer.sign(payload_bytes)
     return _b64url(signature)
-
-
-def calculate_message_sign_test(private_key_b64url: str, seq: int, kid: str, kid_cif: str, message_id: str, cif: str, kids: list, text: str):
-   
-    try:
-        private_key_raw = _b64url_decode(private_key_b64url.strip())
-    except Exception as exc:
-        raise ValueError("Formato chiave privata di firma non valido") from exc
-
-    if len(private_key_raw) != 32:
-        raise ValueError("La chiave privata di firma deve essere lunga 32 byte")
-
-    sanitized_kids = [str(k).strip() for k in kids] if kids else[]
-
-    payload = {
-        "seq": seq,
-        "kid": kid.strip(),
-        "kid_cif": kid_cif.strip(),
-        "id": message_id.strip(),
-        "cif": cif.strip(),
-        "kids": sanitized_kids,
-        "text": text
-    }
-    payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-
-    signer = Ed25519PrivateKey.from_private_bytes(private_key_raw)
-    signature = signer.sign(payload_bytes)
-    return _b64url(signature)
-
-
-
-
 
 def verify_message_sign(
         
     public_key_b64url: str,
-    seq: int,
-    kid: str,
-    kid_cif: str,
-    message_id: str,
-    cif: str,
     signature_b64url: str,
-    kids: list,
+    seq = None,
+    kid = None,
+    kid_cif = None,
+    message_id = None,
+    cif = None,
+    kids = None,
+    text = None,
+    file = None
 ) -> bool:
    
     try:
@@ -136,67 +110,21 @@ def verify_message_sign(
     except Exception:
         return False
 
-    sanitized_kids = [str(k).strip() for k in kids] if kids else[]
-
-
-    payload = {
-        "seq": seq,
-        "kid": kid.strip(),
-        "kid_cif": kid_cif.strip(),
-        "id": message_id.strip(),
-        "cif": cif.strip(),
-        "kids": sanitized_kids,
-    }
-    payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-
-    verifier = Ed25519PublicKey.from_public_bytes(public_key_raw)
-    try:
-        verifier.verify(signature_raw, payload_bytes)
-        return True
-    except InvalidSignature:
-        return False
     
 
-
-
-def verify_message_sign_test(
-        
-    public_key_b64url: str,
-    seq: int,
-    kid: str,
-    kid_cif: str,
-    message_id: str,
-    cif: str,
-    signature_b64url: str,
-    kids: list,
-    text: str,
-) -> bool:
-   
-    try:
-        public_key_raw = _b64url_decode(public_key_b64url.strip())
-    except Exception as exc:
-        raise ValueError("Formato chiave pubblica di firma non valido") from exc
-
-    if len(public_key_raw) != 32:
-        raise ValueError("La chiave pubblica di firma deve essere lunga 32 byte")
-
-    try:
-        signature_raw = _b64url_decode(signature_b64url.strip())
-    except Exception:
-        return False
-
-    sanitized_kids = [str(k).strip() for k in kids] if kids else[]
-
-
-    payload = {
-        "seq": seq,
-        "kid": kid.strip(),
-        "kid_cif": kid_cif.strip(),
-        "id": message_id.strip(),
-        "cif": cif.strip(),
-        "kids": sanitized_kids,
-        "text": text
-    }
+    if file:
+        payload = { "file": _b64url(file)}
+    else:
+        sanitized_kids = [str(k).strip() for k in kids] if kids else[]
+        payload = {
+            "seq": seq,
+            "kid": kid.strip(),
+            "kid_cif": kid_cif.strip(),
+            "id": message_id.strip(),
+            "cif": cif.strip(),
+            "kids": sanitized_kids,
+            "text": text
+        }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
     verifier = Ed25519PublicKey.from_public_bytes(public_key_raw)
@@ -205,9 +133,6 @@ def verify_message_sign_test(
         return True
     except InvalidSignature:
         return False
-
-
-
 
 def derivate_master_key(passphrase: str, salt: bytes):
     kdf = Argon2id(salt=salt, length=32, iterations=2, memory_cost=65536, lanes=4)
@@ -232,12 +157,10 @@ def decrypt_vault(encr_blob, master_key):
 def encrypt_with_age(plaintext: str | bytes, public_keys: list):
     
     try:
-        # Costruisci argomenti age: -r for each recipient
         args = ['age']
         for key in public_keys:
             args.extend(['-r', key])
         
-        # Esegui age con input/output binario
         if isinstance(plaintext, bytes):
             input_data = plaintext
         else:
@@ -246,9 +169,8 @@ def encrypt_with_age(plaintext: str | bytes, public_keys: list):
         result = subprocess.run(args, input=input_data, capture_output=True, check=True)
         ciphertext = result.stdout
         
-        # Converti in base64 per trasmissione sicura
         return base64.b64encode(ciphertext).decode()
-    except subprocess.CalledProcessError as e:
+    except subprocess.CalledProcessError:
         return None
     
 def decrypt_with_age(text, private, decode = True):

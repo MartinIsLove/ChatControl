@@ -53,7 +53,6 @@ async def take_file_data(client, entity, msg, cif_flag: str):
             msg['file_head_size'] = len(file_head_bytes)
             
             metadata_plain = None           
-            header_encrypted_metadata = None
             
             offset = 0
             
@@ -69,24 +68,18 @@ async def take_file_data(client, entity, msg, cif_flag: str):
                         metadata_plain_str = metadata_bytes.decode('utf-8')
                         metadata_plain = json.loads(metadata_plain_str) 
                     except Exception as e:
-                        raise HTTPException(status_code=500, detail= f"parsing dei dati fallito: {e}")
+                        raise HTTPException(status_code=500, detail=f"parsing dei dati fallito: {e}")
                     
                     if cif_flag == "message":
                         encrypted_payload = file_head_bytes[offset : ]
-                        return  metadata_plain, encrypted_payload
+                        return metadata_plain, encrypted_payload
                     
                     elif cif_flag == "file":
-                        if len(file_head_bytes) >= offset + 4:
-                            encrypted_metadata_size = int.from_bytes(file_head_bytes[offset : offset + 4], byteorder='big')
-                            offset += 4
-                            
-                            if 0 < encrypted_metadata_size <= len(file_head_bytes) - offset:
-                                header_encrypted_metadata = file_head_bytes[offset : offset + encrypted_metadata_size]
-                                offset += encrypted_metadata_size
-                                return  metadata_plain, header_encrypted_metadata
+                        return metadata_plain, None
             
     except Exception as e:
-        raise HTTPException(status_code=500, detail= f"estrazione metadata e dati dal file fallita: {e}")
+        raise HTTPException(status_code=500, detail=f"estrazione metadata e dati dal file fallita: {e}")
+    
     return None, None
 
 def split_message(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
@@ -123,7 +116,7 @@ def is_valid_age_public_key(key: str):
         return True
     return False
 
-def build_candidate_privates(chat_keys: dict, kids, kid_cif: str | None = None):
+def build_candidate_privates(chat_keys: dict, kids):
     
     age_key_map = chat_keys.get('chiavi_cif', {})
     selected_kid = list(set(kids) & age_key_map.keys() )

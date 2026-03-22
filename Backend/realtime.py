@@ -72,6 +72,8 @@ def _verify_signed_payload(
     payload_cif,
     payload_sign,
     kids,
+    text = None,
+    file = None,
 ) -> tuple[bool, str]:
 
     if my_id and sender_id == my_id:
@@ -80,7 +82,10 @@ def _verify_signed_payload(
         if not sign_private:
             return False, "chiave di firma locale non disponibile"
         try:
-            expected_sign = calculate_message_sign(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, kids)
+            if file is not None:
+                    expected_sign = calculate_message_sign(sign_private, file=file)
+            else:
+                expected_sign = calculate_message_sign(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, kids, text)
         except ValueError:
             return False, "questo messaggio e' stato modificato"
         return (payload_sign == expected_sign), "questo messaggio e' stato modificato"
@@ -90,7 +95,10 @@ def _verify_signed_payload(
     if not pub_sign:
         return False, "chiave di firma mittente non disponibile"
     try:
-        return verify_message_sign(pub_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, payload_sign, kids), "questo messaggio e' stato modificato"
+        if file is not None:
+            return verify_message_sign(pub_sign, payload_sign, file=file), "questo messaggio e' stato modificato"
+        else:
+            return verify_message_sign(pub_sign, payload_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, kids, text), "questo messaggio e' stato modificato"
     except ValueError:
         return False, "questo messaggio e' stato modificato"
 
@@ -348,8 +356,8 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
         msg['sender_username'] = getattr(sender, 'username', None) if sender else None
         chat_id_cif = hashlib.sha256(pepper.encode() + str(event.chat_id).encode()).hexdigest()
 
-        def realtime_verify_sig(sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, kids):
-            return _verify_signed_payload(data, event.chat_id, chat_id_cif, my_id, sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, kids)
+        def realtime_verify_sig(sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, kids, text=None, file=None):
+            return _verify_signed_payload(data, event.chat_id, chat_id_cif, my_id, sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, kids, text=text, file=file)
 
         def realtime_update_seq(sender_id, seq):
             return _validate_and_store_realtime_seq(data, event.chat_id, sender_id, seq)

@@ -30,7 +30,6 @@ class signupped_2fa(BaseModel):
 
 signup_cache = {}
 
-#funzione primo step della creazione di un utente
 @router.post("/signup/step1")
 async def create_user(credentials: UserData, response: Response):
     client = TelegramClient(StringSession(), credentials.api_id, credentials.api_hash)
@@ -68,7 +67,6 @@ async def create_user(credentials: UserData, response: Response):
     
     return {"status": "SMS inviato"}
      
-#questa funzione si occupa dell'avvio della sessione tramite l'SMS
 @router.post("/signup/step2")
 async def sign_up_verify(credentials: signupped, signup_session: str = Cookie(None), response: Response=None):
     if not signup_session:
@@ -133,7 +131,6 @@ async def sign_up_verify(credentials: signupped, signup_session: str = Cookie(No
 
     return {"status": "Account creato!"}
 
-#questa funzione si occupa dell'avvio della sessione se presente la verica a due fattori
 @router.post("/signup/step3")
 async def sign_up_verify_password(credentials: signupped_2fa, signup_session: str = Cookie(None), response: Response = None):
     if not signup_session:
