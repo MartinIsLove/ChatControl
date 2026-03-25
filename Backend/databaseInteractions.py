@@ -138,7 +138,6 @@ def store_public_key_in_vault(
 
     vault_deciphered = None
     insert_new_vault = False
-
     try:
         with db_lock, get_connection() as conn:
             cursor = conn.cursor()

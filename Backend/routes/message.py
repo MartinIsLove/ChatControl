@@ -236,7 +236,6 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
 async def s_message( message: message, login_session: str = Cookie(None)):
     _, data = is_logged_in(login_session, True)
     client = data['client']
-    print(data)
     if not client.is_connected():
         await client.connect()
 
@@ -401,6 +400,8 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
         inizio_corrente = current_key.get('inizio', 0)
         if time.time() - inizio_corrente < PUBLIC_KEY_COOLDOWN:
             raise HTTPException(status_code=409, detail="Aspetta più tempo per generare un'altra chiave per questa chat")
+
+        
 
     public, privata = genera_chiavi()
 

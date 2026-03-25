@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Cookie, WebSocket, WebSocketDisconnect, HTTPException
-import sqlite3, hashlib, json, base64, io, os, mimetypes
+import sqlite3, hashlib, json, base64, io, os, mimetypes, time
+from datetime import datetime
 from database.sqlite import get_connection, db_lock
 from config import pepper
-from databaseInteractions import store_public_key_in_vault, get_gruppo_vault, get_chat_vault, chats_vault_update
-from cryptography_ import verify_message_sign, decrypt_with_age, calculate_message_sign
-from utils import is_logged_in, is_valid_age_public_key, is_group_chat_id, build_candidate_privates, set_media
+from databaseInteractions import store_public_key_in_vault, get_gruppo_vault, get_chat_vault, chats_vault_update, set_user_vault
+from cryptography_ import verify_message_sign, decrypt_with_age, calculate_message_sign, encrypt_vault
+from utils import is_logged_in, is_valid_age_public_key, is_group_chat_id, build_candidate_privates, set_media, get_current_local_age_key
 from realtime import connect_socket, disconnect_socket, register_telethon_handlers, index_messages
 from telethon.tl.types import MessageService, MessageActionChatCreate, MessageActionChatDeleteUser, MessageActionChatAddUser, MessageActionPinMessage
 from fastapi.responses import StreamingResponse
@@ -486,11 +487,15 @@ async def get_init_messages(chat_id: int, login_session: str = Cookie(None)):
     is_group = is_group_chat_id(chat_id)
     found = 0
     keys_added = 0
+    chat_id_hash = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
+    last_modify = data.get('data', {}).get('chats', {}).get(chat_id_hash, {}).get('time', None)
+    last_dt = datetime.fromtimestamp(last_modify) if last_modify else None
 
-    async for msg in client.iter_messages(entity, search='"cif": "in"', limit=None):
+    async for msg in client.iter_messages(entity, search='"cif": "in"', limit=None, offset_date = last_dt, reverse= True):
+        if last_dt and (not msg.date or msg.date.timestamp() <= last_modify):
+            continue
         if my_id and msg.sender_id == my_id:
             continue
-
         text = msg.message or ''
         try:
             parsed = json.loads(text)
@@ -520,6 +525,18 @@ async def get_init_messages(chat_id: int, login_session: str = Cookie(None)):
         )
         if changed:
             keys_added += 1
+        data['data']['chats'][chat_id_hash]['time'] = time.time()
+
+    username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
+
+    if 'masterkey' in data['data']:
+        temp_data = data['data'].copy()
+        del temp_data['masterkey']
+        vault_ciphered = encrypt_vault(temp_data, data['data']['masterkey'])
+
+    else:
+        vault_ciphered = encrypt_vault(data['data'], data['data']['masterkey'])
+    set_user_vault(username, vault_ciphered)
 
     return {
         "chat_id": chat_id,

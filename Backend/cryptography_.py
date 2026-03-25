@@ -83,8 +83,7 @@ def calculate_message_sign(private_key_b64url: str, seq = None, kid = None, kid_
     signature = signer.sign(payload_bytes)
     return _b64url(signature)
 
-def verify_message_sign(
-        
+def verify_message_sign(  
     public_key_b64url: str,
     signature_b64url: str,
     seq = None,
@@ -181,7 +180,6 @@ def decrypt_with_age(text, private, decode = True):
         except:
             text_bytes = text if isinstance(text, (bytes, bytearray)) else str(text).encode()
 
-        
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as keyfile:
             keyfile.write(private)
             keyfile_path = keyfile.name
@@ -220,4 +218,3 @@ def genera_chiavi():
         return public, private
     except subprocess.CalledProcessError:
         return None, None
-
