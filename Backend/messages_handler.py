@@ -1,35 +1,115 @@
 from utils import is_valid_age_public_key, is_group_chat_id, build_candidate_privates, are_metadata_equals, take_file_data
-from databaseInteractions import store_public_key_in_vault
-from cryptography_ import decrypt_with_age
-import json
+from databaseInteractions import store_public_key_in_vault, get_gruppo_vault, get_chat_vault
+from cryptography_ import decrypt_with_age, verify_message_sign
+import json, hashlib
+from config import pepper
 
 async def handle_in(my_id, msg, data, entity):
     chat_id = msg.get('chat_id')
-    if my_id and msg.get('sender_id') == my_id:
+    sender_id = msg.get('sender_id')
+
+    if my_id and sender_id == my_id:
         msg['is_json'] = False
         msg['text'] = None
         msg['chiave'] = "Questo messaggio e' uno scambio di chiave"
         msg['is_system'] = True
         return 
-    public = msg.get('json', {}).get('public')
-    kid = msg.get('json', {}).get('kid')
-    kid_cif = msg.get('json', {}).get('kid_cif')
-    pub_sign = msg.get('json', {}).get('pub_sign')
+    
+    json_data = msg.get('json', {})
+    public = json_data.get('public')
+    kid = json_data.get('kid')
+    kid_cif = json_data.get('kid_cif')
+    pub_sign = json_data.get('pub_sign')
+    ikey = json_data.get('ikey')
+    sign = json_data.get('sign')
+    
     if not is_valid_age_public_key(public) or any(t is None for t in (public, kid, kid_cif, pub_sign)):
-        msg['error'] = "questo messaggio e' stato modificato"
+        msg['error'] = "questo messaggio e' stato modificato (campi base mancanti)"
         msg.pop('json', None)
         msg['is_json'] = False
         return 
+
+    username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
+    is_group = is_group_chat_id(chat_id)
+    saved_ikey = None
+    known_kids =[]
+
+    try:
+        if is_group:
+            _, chat_vault = get_gruppo_vault(username, chat_id, entity, data)
+            sender_str = str(sender_id)
+            participant = chat_vault.get('partecipanti', {}).get(sender_str)
+            if not isinstance(participant, dict):
+                participant = chat_vault.get('partecipanti', {}).get(sender_id, {})
+                
+            saved_ikey = participant.get('ikey')
+            chiavi_map = participant.get('chiavi_cif', {})
+        else:
+            _, chat_vault = await get_chat_vault(username, chat_id, data['client'], data)
+            saved_ikey = chat_vault.get('ikey')
+            chiavi_map = chat_vault.get('chiavi_cif', {})
+            
+        if isinstance(chiavi_map, dict):
+            known_kids = list(chiavi_map.keys())
+    except Exception:
+        saved_ikey = None
+        known_kids =[]
+
+    if not saved_ikey:
+        if not ikey:
+            msg['error'] = "Chiave di identita' (ikey) mancante. Possibile manomissione."
+            msg.pop('json', None)
+            msg['is_json'] = False
+            return
+        key_to_save = ikey
+    else:
+        is_known_key = (kid_cif in known_kids)
+
+        if not is_known_key:
+            if not sign:
+                msg['error'] = "Firma di identita' mancante per le nuove chiavi. Rotazione negata."
+                msg.pop('json', None)
+                msg['is_json'] = False
+                return
+            
+            try:
+                is_valid = verify_message_sign(
+                    saved_ikey, 
+                    sign, 
+                    public, 
+                    kid, 
+                    kid_cif, 
+                    pub_sign, 
+                    identity=True
+                )
+            except Exception:
+                is_valid = False
+
+            if not is_valid:
+                msg['error'] = "Firma di identita' non valida! Possibile attacco Man-in-the-Middle."
+                msg.pop('json', None)
+                msg['is_json'] = False
+                return
+        else:
+            if ikey and ikey != saved_ikey:
+                msg['error'] = "Tentativo di alterare la chiave di identita' storica."
+                msg.pop('json', None)
+                msg['is_json'] = False
+                return
+
+        key_to_save = saved_ikey 
+
     store_public_key_in_vault(
         data,
         chat_id,
-        msg.get('sender_id'),
+        sender_id,
         public,
         kid=kid,
         kid_cif=kid_cif,
         pub_sign=pub_sign,
-        is_group=is_group_chat_id(chat_id),
-        group_title=getattr(entity, 'title', 'Gruppo')
+        is_group=is_group,
+        group_title=getattr(entity, 'title', 'Gruppo'),
+        ikey=key_to_save 
     )
     
     msg['text'] = None

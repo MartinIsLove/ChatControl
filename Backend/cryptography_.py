@@ -53,7 +53,7 @@ def derive_signing_keys_from_age_private(age_private_key: str):
         "kid": _b64url(kid),
     }
 
-def calculate_message_sign(private_key_b64url: str, seq = None, kid = None, kid_cif = None, message_id = None, cif = None, kids = None, text = None, file = None):
+def calculate_message_sign(private_key_b64url: str, seq = None, kid = None, kid_cif = None, message_id = None, cif = None, kids = None, text = None, file = None, identity = None):
    
     try:
         private_key_raw = _b64url_decode(private_key_b64url.strip())
@@ -62,21 +62,28 @@ def calculate_message_sign(private_key_b64url: str, seq = None, kid = None, kid_
 
     if len(private_key_raw) != 32:
         raise ValueError("La chiave privata di firma deve essere lunga 32 byte")
-
-    if file is not None:
-        payload = {"file": _b64url(file)}
-    else:
-        sanitized_kids = [str(k).strip() for k in kids] if kids else[]
-
+    if identity:
         payload = {
-            "seq": seq,
-            "kid": kid.strip(),
-            "kid_cif": kid_cif.strip(),
-            "id": message_id.strip(),
-            "cif": cif.strip(),
-            "kids": sanitized_kids,
-            "text": text
+                "seq": seq,
+                "kid": kid.strip(),
+                "kid_cif": kid_cif.strip(),
+                "id": message_id.strip(),
         }
+    else:
+        if file is not None:
+            payload = {"file": _b64url(file)}
+        else:
+            sanitized_kids = [str(k).strip() for k in kids] if kids else[]
+
+            payload = {
+                "seq": seq,
+                "kid": kid.strip(),
+                "kid_cif": kid_cif.strip(),
+                "id": message_id.strip(),
+                "cif": cif.strip(),
+                "kids": sanitized_kids,
+                "text": text
+            }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
     signer = Ed25519PrivateKey.from_private_bytes(private_key_raw)
@@ -93,7 +100,8 @@ def verify_message_sign(
     cif = None,
     kids = None,
     text = None,
-    file = None
+    file = None,
+    identity = None
 ) -> bool:
    
     try:
@@ -109,9 +117,15 @@ def verify_message_sign(
     except Exception:
         return False
 
-    
+    if identity:
+        payload = {
+                "seq": seq,
+                "kid": kid.strip(),
+                "kid_cif": kid_cif.strip(),
+                "id": message_id.strip(),
+        }
 
-    if file:
+    elif file:
         payload = { "file": _b64url(file)}
     else:
         sanitized_kids = [str(k).strip() for k in kids] if kids else[]
@@ -139,6 +153,29 @@ def derivate_master_key(passphrase: str, salt: bytes):
     master_key_base64 = base64.urlsafe_b64encode(raw_key)
     return master_key_base64
 
+def genera_chiavi_firma():
+    """Genera una coppia di chiavi Ed25519 formattata come le altre funzioni.
+    Restituisce un dict con `private_key`, `public_key` e `kid` in base64url.
+    """
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key()
+
+    private_bytes = private_key.private_bytes(
+        encoding=Encoding.Raw,
+        format=PrivateFormat.Raw,
+        encryption_algorithm=NoEncryption(),
+    )
+    public_bytes = public_key.public_bytes(
+        encoding=Encoding.Raw,
+        format=PublicFormat.Raw,
+    )
+
+    kid_full = hashes.Hash(hashes.SHA256())
+    kid_full.update(public_bytes)
+    kid = kid_full.finalize()[:16]
+
+    return  _b64url(private_bytes), _b64url(public_bytes),  _b64url(kid)
+    
 def encrypt_vault(dic_mess, master_key):
     json_data = json.dumps(dic_mess)
     f = Fernet(master_key)

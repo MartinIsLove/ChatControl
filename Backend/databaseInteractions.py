@@ -129,6 +129,7 @@ def store_public_key_in_vault(
     is_group: bool | None = None,
     group_title: str | None = None,
     sender_username: str | None = None,
+    ikey: str | None = None
 ):
     if str(user_data['data'].get('user_id')) == str(sender_id):
         return False
@@ -206,6 +207,9 @@ def store_public_key_in_vault(
         
         participant_data['kid_corrente']= kid
 
+        if ikey:
+            participant_data['ikey'] = ikey
+
         participants[sender_id_str] = participant_data
     else:
         participant_data = vault_deciphered
@@ -226,7 +230,9 @@ def store_public_key_in_vault(
         participant_data.setdefault('kid_corrente',{})
         
         participant_data['kid_corrente']= kid
-
+        
+        if ikey:
+            participant_data['ikey'] = ikey
         
 
     

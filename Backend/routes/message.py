@@ -2,7 +2,7 @@ from fastapi import APIRouter, Cookie, HTTPException, UploadFile, File, Form
 import time, hashlib, base64, json, tempfile, shutil, os, secrets, mimetypes, io
 from pydantic import BaseModel
 from config import pepper
-from cryptography_ import encrypt_with_age, genera_chiavi, encrypt_vault, derive_signing_keys_from_age_private, calculate_message_sign
+from cryptography_ import encrypt_with_age, genera_chiavi, encrypt_vault, derive_signing_keys_from_age_private, calculate_message_sign, genera_chiavi_firma
 from databaseInteractions import get_chat_chyper_keys, get_group_chyper_keys, set_user_vault
 from utils import  is_logged_in, split_message, get_current_local_age_key, ensure_chat_seq, wait_for_public_key_message
 from telethon.tl.types import DocumentAttributeFilename
@@ -396,12 +396,19 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
     chat_data = data['data']['chats'].get(chat_id_hash, {})
     current_key = get_current_local_age_key(chat_data)
     
-    if current_key and current_key.get('inizio'):
+    
+    if not current_key:
+        private_sign, public_sign, kid = genera_chiavi_firma()
+        if 'chats' not in data['data']:
+            data['data']['chats'] = {}
+        if chat_id_hash not in data['data']['chats'] or not isinstance(data['data']['chats'][chat_id_hash], dict):
+            data['data']['chats'][chat_id_hash] = {}
+        data['data']['chats'][chat_id_hash]['chiave_identita'] = {'privata': private_sign, 'publica': public_sign, 'kid': kid}
+
+    elif current_key and current_key.get('inizio'):
         inizio_corrente = current_key.get('inizio', 0)
         if time.time() - inizio_corrente < PUBLIC_KEY_COOLDOWN:
             raise HTTPException(status_code=409, detail="Aspetta più tempo per generare un'altra chiave per questa chat")
-
-        
 
     public, privata = genera_chiavi()
 
@@ -423,13 +430,15 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
 
     seq_value = chat_data.get('seq') if isinstance(chat_data.get('seq'), int) else 0
 
-    data['data']['chats'][chat_id_hash] = {
-        'chiavi_cif': updated_age_kid_map,
-        'seq': seq_value,
-        'kid': updated_kid_map,
-        'kid_corrente': derivated['kid'],
-        'kid_cif_corrente': second_kid,
-    }
+    if chat_id_hash not in data['data']['chats']:
+         data['data']['chats'][chat_id_hash] = {}
+         
+    data['data']['chats'][chat_id_hash]['chiavi_cif'] = updated_age_kid_map
+    data['data']['chats'][chat_id_hash]['seq'] = seq_value
+    data['data']['chats'][chat_id_hash]['kid'] = updated_kid_map
+    data['data']['chats'][chat_id_hash]['kid_corrente'] = derivated['kid']
+    data['data']['chats'][chat_id_hash]['kid_cif_corrente'] = second_kid
+    
     username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
     if 'masterkey' in data['data']:
         temp_data = data['data'].copy()
@@ -440,14 +449,27 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
         ciphered_vault = encrypt_vault(data['data'], data['data']['masterkey'])
 
     set_user_vault(username, ciphered_vault)
-
-    message_payload = {
-        "cif":"in",
-        "public":public,
-        'kid': derivated['kid'],
-        'kid_cif': second_kid,
-        'pub_sign': derivated['public_key']
-    }
+    
+    if not current_key:
+        message_payload = {
+            "cif":"in",
+            "public":public,
+            'kid': derivated['kid'],
+            'kid_cif': second_kid,
+            'pub_sign': derivated['public_key'],
+            'ikey':public_sign
+        }
+        
+    else:
+        print(data)
+        message_payload = {
+            "cif":"in",
+            "public":public,
+            'kid': derivated['kid'],
+            'kid_cif': second_kid,
+            'pub_sign': derivated['public_key'],
+            'sign': calculate_message_sign(data['data']['chats'][chat_id_hash]['chiave_identita'].get('privata') , public, derivated['kid'], second_kid, derivated['public_key'], identity= True)
+        }
     
     try:
         await client.send_message(credentials.chat_id, json.dumps(message_payload))
