@@ -312,10 +312,8 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
 
     messages = []
     add_offset = start if start and start > 0 else 0
-    iter_kwargs = {"limit": limit}
-    if add_offset:
-        iter_kwargs["add_offset"] = add_offset
-    async for msg in client.iter_messages(entity, **iter_kwargs):
+    
+    async for msg in client.iter_messages(entity, limit = limit, add_offset = add_offset):
         sender = await msg.get_sender()
         system_message = None
         if isinstance(msg, MessageService):

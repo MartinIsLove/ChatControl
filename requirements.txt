@@ -6,3 +6,5 @@ python-dotenv
 python-multipart
 uvicorn[standard]
 pydantic
+FastTelethonhelper
+cryptg

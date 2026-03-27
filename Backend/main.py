@@ -17,6 +17,7 @@ app.add_middleware(
         "https://192.168.1.228:5173",
         "https://server.apernici.it",
         "https://apernici.it",
+		"https://192.168.1.220:5173"
     ],
     allow_credentials=True,
     allow_methods=["*"],

@@ -160,6 +160,17 @@
             },
             handleChatEvent(payload) {
               console.log("[WS] handleChatEvent chiamato con:", payload)
+              if (payload.event_type === 'upload_success') {
+                console.log("[WS] Upload completato con successo per:", payload.temp_msg_id)
+                this.replaceOptimisticId(payload.temp_msg_id, payload.message_id)
+                this.queueRealtimeReload() // Ricarichiamo la chat per avere formattazione corretta
+                return
+              }
+              if (payload.event_type === 'upload_error') {
+                console.log("[WS] Errore di upload:", payload.error)
+                this.failOptimisticMessage(payload.temp_msg_id, payload.error)
+                return
+              }
               if (!payload || !this.selectedChat) {
                 console.log("[WS] handleChatEvent: payload o selectedChat mancante")
                 return
@@ -543,26 +554,25 @@
 
                   const formData = new FormData()
                   formData.append('file',outgoingFile)
-                  formData.append('text', outgoingText)
+                  formData.append('text', outgoingText || '')
                   formData.append('chat_id',this.selectedChat.id)
                   formData.append('cryph',false)
                   formData.append('group',this.selectedChat.is_group)
-                  const resp = await api.post('/messages/send/file', formData,
-                   { withCredentials: true })
-                  if (resp?.data?.message_id) this.replaceOptimisticId(optimisticId, resp.data.message_id)
+                  formData.append('temp_msg_id', optimisticId) 
+
+                  await api.post('/messages/send/file', formData, { withCredentials: true })
                   
                 }
                 else if(outgoingFile && !outgoingText){
                   const formData = new FormData()
                   formData.append('file',outgoingFile)
-                  formData.append('text', '')
+                  formData.append('text', outgoingText || '')
                   formData.append('chat_id',this.selectedChat.id)
                   formData.append('cryph',false)
                   formData.append('group',this.selectedChat.is_group)
+                  formData.append('temp_msg_id', optimisticId) 
 
-                  const resp = await api.post('/messages/send/file', formData,
-                   { withCredentials: true })
-                  if (resp?.data?.message_id) this.replaceOptimisticId(optimisticId, resp.data.message_id)
+                  await api.post('/messages/send/file', formData, { withCredentials: true })
                 }
                 else if(outgoingText.trim().length !== 0){
                   await api.post('/messages/send', {
@@ -643,15 +653,14 @@
 
                   const formData = new FormData()
                   formData.append('file',outgoingFile)
-                  formData.append('text', outgoingText)
+                  formData.append('text', outgoingText || '')
                   formData.append('chat_id',this.selectedChat.id)
                   formData.append('cryph',true)
                   formData.append('group',this.selectedChat.is_group)
+                  formData.append('temp_msg_id', optimisticId) // <-- AGGIUNGI QUESTO
+                  
                   try{
-                    const resp = await api.post('/messages/send/file', formData,
-                    { withCredentials: true })
-                    if (resp?.data?.message_id) this.replaceOptimisticId(optimisticId, resp.data.message_id)
-                    else this.resolveOptimisticMessage(optimisticId)
+                    await api.post('/messages/send/file', formData, { withCredentials: true })
                   }
                   catch(e){
                     this.errormsg = e.response?.data?.message || e.message
@@ -670,15 +679,15 @@
 
                   const formData = new FormData()
                   formData.append('file',outgoingFile)
-                  formData.append('text', "")
+                  formData.append('text', outgoingText || '')
                   formData.append('chat_id',this.selectedChat.id)
                   formData.append('cryph',true)
                   formData.append('group',this.selectedChat.is_group)
+                  formData.append('temp_msg_id', optimisticId) // <-- AGGIUNGI QUESTO
+                  
                   try{
-                    const resp = await api.post('/messages/send/file', formData,
-                    { withCredentials: true })
-                    if (resp?.data?.message_id) this.replaceOptimisticId(optimisticId, resp.data.message_id)
-                    else this.resolveOptimisticMessage(optimisticId)
+                    await api.post('/messages/send/file', formData, { withCredentials: true })
+                    // ELIMINATO: if (resp?.data?.message_id) this.replaceOptimisticId...
                   }
                   catch(e){
                     this.errormsg = e.response?.data?.message || e.message

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Cookie, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Cookie, HTTPException, UploadFile, File, Form, BackgroundTasks
 import time, hashlib, base64, json, tempfile, shutil, os, secrets, mimetypes, io
 from pydantic import BaseModel
 from config import pepper
@@ -6,6 +6,8 @@ from cryptography_ import encrypt_with_age, genera_chiavi, encrypt_vault, derive
 from databaseInteractions import get_chat_chyper_keys, get_group_chyper_keys, set_user_vault
 from utils import  is_logged_in, split_message, get_current_local_age_key, ensure_chat_seq, wait_for_public_key_message
 from telethon.tl.types import DocumentAttributeFilename
+from FastTelethonhelper import fast_upload
+from realtime import broadcast_event 
 
 router = APIRouter()
 
@@ -54,71 +56,47 @@ async def delete(message: delete_m, login_session: str = Cookie(None)):
     except Exception:
         raise HTTPException(status_code=502, detail="Non hai il permesso di cancellare questo messaggio")
 
-@router.post("/messages/send/file")
-async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = Form(False),group: bool = Form(False), file: UploadFile = File(...),login_session: str = Cookie(None)):
-    _, data = is_logged_in(login_session, True)
-    client = data['client']
-
-
-    if not client.is_connected():
-        await client.connect()
-
-    if not cryph:
-        try:
-            ext = os.path.splitext(file.filename)[1]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-                shutil.copyfileobj(file.file, tmp)
-                tmp_path = tmp.name
-
+async def process_file_upload_task(
+    tmp_in_path: str, original_filename: str, mime_type: str, 
+    chat_id: int, text: str, cryph: bool, group: bool, 
+    temp_msg_id: str, temp_session_id: str, login_session: str, 
+    data: dict, client
+):
+    try:
+        chat_id_hash = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
+        
+        if not cryph:
+            # UPLOAD IN CHIARO
+            uploaded_file = await fast_upload(client, tmp_in_path)
             sent_msg = await client.send_file(
                 chat_id,
-                tmp_path,
+                uploaded_file,
                 caption=text,
                 force_document=True,
-                attributes=[DocumentAttributeFilename(file.filename)]
+                attributes=[DocumentAttributeFilename(original_filename)]
             )
-            os.remove(tmp_path)
-
-            sent_id = None
-            try:
-                sent_id = getattr(sent_msg, 'id', None)
-            except Exception:
-                sent_id = None
-
-            return {"status": "ok", "message_id": sent_id}
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
-
-    else:
-        id_mess = secrets.token_hex(16)
-
-        token = secrets.token_hex(8)
-        nome_file = token + ".dat"
-
-        chat_id_hash = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
-
-        
-        await send_public_if_not_exist(chat_id, login_session, client, chat_id_hash, data)
-
-
-        if group:
-            keys = get_group_chyper_keys(data, chat_id)
+            sent_id = getattr(sent_msg, 'id', None)
+            
         else:
-            keys = get_chat_chyper_keys(data, chat_id)
-        
+            id_mess = secrets.token_hex(16)
+            token = secrets.token_hex(8)
+            nome_file = token + ".dat"
+            
+            await send_public_if_not_exist(chat_id, login_session, client, chat_id_hash, data)
 
-        kids = []
-        recipient_keys = []
-        for kid, value in keys.items():
-            if value is not None and kid is not None:
-                kids.append(kid)
-                recipient_keys.append(value)
-        try:
-            file_content = await file.read()
+            keys = get_group_chyper_keys(data, chat_id) if group else get_chat_chyper_keys(data, chat_id)
+            
+            kids, recipient_keys = [],[]
+            for kid, value in keys.items():
+                if value is not None and kid is not None:
+                    kids.append(kid)
+                    recipient_keys.append(value)
+            
+            with open(tmp_in_path, "rb") as f:
+                file_content = f.read()
 
-            tmp_mime, _ = mimetypes.guess_type(file.filename)
-            mime = tmp_mime or file.content_type or "application/octet-stream"
-
+            tmp_mime, _ = mimetypes.guess_type(original_filename)
+            mime = tmp_mime or mime_type or "application/octet-stream"
 
             chat_entry = data.get('data', {}).get('chats', {}).get(chat_id_hash, {})
             kid = chat_entry.get('kid_corrente')
@@ -128,22 +106,21 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
             seq = ensure_chat_seq(data, chat_id_hash) + 1
             data['data']['chats'][chat_id_hash]['seq'] = seq
             username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
+            
             if 'masterkey' in data['data']:
                 temp_data = data['data'].copy()
                 del temp_data['masterkey']
                 vault_ciphered = encrypt_vault(temp_data, data['data']['masterkey'])
-            
             else:
                 vault_ciphered = encrypt_vault(data['data'], data['data']['masterkey'])
                 
             set_user_vault(username, vault_ciphered)
 
             sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_mess, "file", kids, text)
-
             file_sign = calculate_message_sign(sign_private, file=file_content)
 
             inner_metadata = {
-                "filename": file.filename,
+                "filename": original_filename,
                 "cif": "file",
                 "text": text,
                 "mime": mime,
@@ -161,7 +138,7 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
             testo_cifrato = encrypt_with_age(json_inner_metadata, recipient_keys)
 
             if testo_cifrato is None:
-                raise HTTPException(status_code=500, detail="Errore durante la cifratura dei metadati con age")
+                raise Exception("Errore durante la cifratura dei metadati con age")
 
             metadata = {
                 "cif": "file",
@@ -174,63 +151,90 @@ async def s_file(chat_id: int = Form(...), text: str = Form(""), cryph: bool = F
                 "kids": kids,
             }
 
-
-            json_metadata = json.dumps(metadata, sort_keys=True)
-            metadata_bytes = json_metadata.encode('utf-8')
+            metadata_bytes = json.dumps(metadata, sort_keys=True).encode('utf-8')
             metadata_size = len(metadata_bytes)
-
+            
             encrypted_file = encrypt_with_age(file_content, recipient_keys)
             if encrypted_file is None:
-                raise HTTPException(status_code=500, detail="Errore durante la cifratura del file con age")
+                raise Exception("Errore durante la cifratura del file con age")
 
-            encrypted_file = encrypted_file.encode('utf-8')
+            payload = metadata_size.to_bytes(4, byteorder='big') + metadata_bytes + encrypted_file.encode('utf-8')
 
-            payload = (
-                metadata_size.to_bytes(4, byteorder='big')
-                + metadata_bytes
-                + encrypted_file
-            )
+            # Scriviamo il payload cifrato in un file .dat temporaneo per l'upload
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".dat") as tmp_enc:
+                tmp_enc.write(payload)
+                tmp_enc_path = tmp_enc.name
 
-            encrypted_payload = payload
-
-            caption = {
-                "cif":"file",
-            }
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".dat") as tmp:
-                if isinstance(encrypted_payload, str):
-                    tmp.write(encrypted_payload.encode('utf-8'))
-                else:
-                    tmp.write(encrypted_payload)
-                tmp_path = tmp.name
-            
-            caption_str = json.dumps(caption)
-
-            sent_msg = None
             try:
+                uploaded_file = await fast_upload(client, tmp_enc_path)
                 sent_msg = await client.send_file(
                     chat_id,
-                    tmp_path,
-                    caption=caption_str,
+                    uploaded_file,
+                    caption=json.dumps({"cif":"file"}),
                     force_document=True,
                     attributes=[DocumentAttributeFilename(nome_file)],
                 )
-            finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-
-            sent_id = None
-            try:
                 sent_id = getattr(sent_msg, 'id', None)
-            except Exception:
-                sent_id = None
+            finally:
+                if os.path.exists(tmp_enc_path):
+                    os.remove(tmp_enc_path)
 
-            return {"status": "ok", "message_id": sent_id}
+        await broadcast_event(temp_session_id, chat_id, {
+            "event_type": "upload_success",
+            "chat_id": chat_id,
+            "temp_msg_id": temp_msg_id,
+            "message_id": sent_id
+        })
 
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
+    except Exception as e:
+        await broadcast_event(temp_session_id, chat_id, {
+            "event_type": "upload_error",
+            "chat_id": chat_id,
+            "temp_msg_id": temp_msg_id,
+            "error": str(e)
+        })
+    finally:
+        if os.path.exists(tmp_in_path):
+            os.remove(tmp_in_path)
+
+
+@router.post("/messages/send/file")
+async def s_file(
+    background_tasks: BackgroundTasks,
+    chat_id: int = Form(...), 
+    text: str = Form(""), 
+    cryph: bool = Form(False), 
+    group: bool = Form(False), 
+    temp_msg_id: str = Form(""),
+    file: UploadFile = File(...), 
+    login_session: str = Cookie(None)
+):
+    temp_session_id, data = is_logged_in(login_session, True)
+    client = data['client']
+
+    if not client.is_connected():
+        await client.connect()
+
+    ext = os.path.splitext(file.filename)[1]
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+        tmp_in_path = tmp.name
+        
+    with open(tmp_in_path, "wb") as buffer:
+        while True:
+            chunk = await file.read(2 * 1024 * 1024) # Legge 2 MB alla volta
+            if not chunk:
+                break
+            buffer.write(chunk)
+
+    background_tasks.add_task(
+        process_file_upload_task,
+        tmp_in_path, file.filename, file.content_type, 
+        chat_id, text, cryph, group, 
+        temp_msg_id, temp_session_id, login_session, 
+        data, client
+    )
+
+    return {"status": "processing", "temp_msg_id": temp_msg_id}
         
 @router.post("/messages/send")
 async def s_message( message: message, login_session: str = Cookie(None)):
@@ -311,8 +315,6 @@ async def s_message( message: message, login_session: str = Cookie(None)):
             "sign": sign,
             "kids": kids
         }
-
-        
 
         json_da_cifrare = json.dumps(da_cifrare, sort_keys= True)
         text_cyp = encrypt_with_age(json_da_cifrare, recipient_keys)
