@@ -1,4 +1,4 @@
-import subprocess, base64, json, os, tempfile
+import subprocess, base64, json, os, hashlib, tempfile
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from cryptography.hazmat.primitives import hashes
@@ -240,6 +240,42 @@ def decrypt_with_age(text, private, decode = True):
     
     return decrypted_text
 
+def encrypt_file_with_age(src_path: str, dest_path: str, public_keys: list):
+    try:
+        args = ['age']
+        for key in public_keys:
+            args.extend(['-r', key])
+        
+        with open(src_path, 'rb') as f_in, open(dest_path, 'wb') as f_out:
+            subprocess.run(args, stdin=f_in, stdout=f_out, check=True)
+        return True
+    except Exception:
+        return False
+def get_file_sha256(file_path: str):
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(65536), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.digest()
+
+def calculate_message_sign_stream(private_key_b64url: str, seq=None, kid=None, kid_cif=None, message_id=None, cif=None, kids=None, text=None, file_hash: bytes = None, identity=None):
+    try:
+        private_key_raw = _b64url_decode(private_key_b64url.strip())
+        if identity:
+            payload = {"seq": seq, "kid": kid.strip(), "kid_cif": kid_cif.strip(), "id": message_id.strip()}
+        elif file_hash:
+            payload = {"file_hash": _b64url(file_hash)}
+        else:
+            sanitized_kids = [str(k).strip() for k in kids] if kids else []
+            payload = {"seq": seq, "kid": kid.strip(), "kid_cif": kid_cif.strip(), "id": message_id.strip(), "cif": cif.strip(), "kids": sanitized_kids, "text": text}
+        
+        payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        signer = Ed25519PrivateKey.from_private_bytes(private_key_raw)
+        signature = signer.sign(payload_bytes)
+        return _b64url(signature)
+    except Exception:
+        return None
+    
 def genera_chiavi():
     try:
         risultato = subprocess.run(['age-keygen'], capture_output=True, text=True, check=True)

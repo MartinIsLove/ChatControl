@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Cookie, WebSocket, WebSocketDisconnect, HTTPException
-import sqlite3, hashlib, json, base64, io, os, mimetypes, time
+import sqlite3, hashlib, json, tempfile, io, os, asyncio, time, subprocess
 from datetime import datetime
 from database.sqlite import get_connection, db_lock
 from config import pepper
 from databaseInteractions import store_public_key_in_vault, get_gruppo_vault, get_chat_vault, chats_vault_update, set_user_vault
 from cryptography_ import verify_message_sign, decrypt_with_age, calculate_message_sign, encrypt_vault
-from utils import is_logged_in, is_valid_age_public_key, is_group_chat_id, build_candidate_privates, set_media, get_current_local_age_key
+from utils import is_logged_in, is_valid_age_public_key, is_group_chat_id, build_candidate_privates, set_media
 from realtime import connect_socket, disconnect_socket, register_telethon_handlers, index_messages
 from telethon.tl.types import MessageService, MessageActionChatCreate, MessageActionChatDeleteUser, MessageActionChatAddUser, MessageActionPinMessage
 from fastapi.responses import StreamingResponse
@@ -601,187 +601,123 @@ async def download_media(chat_id: int, message_id: int, login_session: str = Coo
 async def download_encrypt_media(chat_id: int, message_id: int, login_session: str = Cookie(None)):
     _, data = is_logged_in(login_session, True)
     client = data['client']
-
     if not client.is_connected():
         await client.connect()
     
     try:
         username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
-
         me = await client.get_me()
         my_id = me.id if me else None
+        
         entity = await client.get_entity(chat_id)
         message = await client.get_messages(entity, ids=message_id)
-        try:
-            if is_group_chat_id(chat_id):
-                _, chat_vault = get_gruppo_vault(username, chat_id, entity, data)
-            else:
-                _, chat_vault = await get_chat_vault(username, chat_id, client, data)
-        except sqlite3.Error as error:
-            raise HTTPException(status_code=500, detail=str(error))
         
-        if not message:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Messaggio non trovato (chat_id={chat_id}, message_id={message_id})"
-            )
-        if not message.media or not message.document:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Messaggio senza documento (chat_id={chat_id}, message_id={message_id})"
-            )
+        if not message or not message.media or not message.document:
+            raise HTTPException(status_code=404, detail="File non trovato")
 
-        filename = None
-        for attr in (message.document.attributes or[]):
-            if hasattr(attr, 'file_name'):
-                filename = attr.file_name
-                break
+        # 2. Verifica che sia un file cifrato (.dat)
+        filename_attr = next((attr.file_name for attr in message.document.attributes if hasattr(attr, 'file_name')), None)
+        if not filename_attr or not filename_attr.endswith('.dat'):
+            raise HTTPException(status_code=400, detail="Il documento non è nel formato cifrato atteso")
 
-        if not filename or not filename.endswith('.dat'):
-            raise HTTPException(status_code=400, detail="Documento non cifrato")
+        head_chunk = b""
+        async for chunk in client.iter_download(message.document, limit=128 * 1024):
+            head_chunk += chunk
+            if len(head_chunk) > 4:
+                meta_size = int.from_bytes(head_chunk[:4], byteorder='big')
+                if len(head_chunk) >= 4 + meta_size:
+                    break
+        
+        if len(head_chunk) < 4:
+            raise HTTPException(status_code=400, detail="File corrotto")
 
-        caption_text = message.message or ""
+        meta_size = int.from_bytes(head_chunk[:4], byteorder='big')
         try:
-            caption_json = json.loads(caption_text)
+            metadata_plain = json.loads(head_chunk[4:4+meta_size].decode('utf-8'))
         except Exception:
-            raise HTTPException(status_code=400, detail="Caption non valida")
-
-        cif_flag = caption_json.get('CIF') or caption_json.get('cif')
-        if cif_flag != "file":
-            raise HTTPException(status_code=400, detail="Caption non cifrata")
-
-        mess = {}
-       
-        full_message = await client.get_messages(entity, ids=message_id)
-        if full_message and full_message.media:
-            file_bytes = io.BytesIO()            
-            await client.download_media(full_message, file=file_bytes)
-            
-            file_bytes.seek(0)
-            file_head_bytes = file_bytes.getvalue()
-            
-            mess['file_head'] = base64.b64encode(file_head_bytes).decode()
-            mess['file_head_size'] = len(file_head_bytes)
-            
-            metadata_plain = None            
-            encrypted_file = None
-            offset = 0
-            
-            if len(file_head_bytes) >= offset + 4:
-                metadata_size = int.from_bytes(file_head_bytes[offset : offset + 4], byteorder='big')
-                offset += 4
-                
-                if 0 < metadata_size <= len(file_head_bytes) - offset:
-                    metadata_bytes = file_head_bytes[offset : offset + metadata_size]
-                    offset += metadata_size
-                    
-                    try:
-                        metadata_plain_str = metadata_bytes.decode('utf-8')
-                        metadata_plain = json.loads(metadata_plain_str) 
-                    except Exception as e:
-                        print(f"Errore nel parsing del metadata_plain: {e}")
-                    
-                    encrypted_file = file_head_bytes[offset : ]
-
-                mess['metadata_plain'] = metadata_plain
-                mess['file'] = encrypted_file
-
-        if not mess.get('metadata_plain'):
-            raise HTTPException(status_code=400, detail="Metadati non trovati o malformati nel file scaricato")
-
-        metadata_plain = mess['metadata_plain']
-        mess_decrypted_id_caption = metadata_plain.get('id')
-        seq = metadata_plain.get('seq')
-        kid = metadata_plain.get('kid')
-        kid_cif = metadata_plain.get('kid_cif')
-        sign = metadata_plain.get('sign')
-        kids = metadata_plain.get('kids')
-        encrypted_inner_metadata = metadata_plain.get('text')
-
-        if not encrypted_inner_metadata:
-             raise HTTPException(status_code=400, detail="Metadati cifrati mancanti")
+            raise HTTPException(status_code=400, detail="Impossibile leggere i metadati")
 
         chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
-        chats_data = data['data'].get('chats', {})
-        chat_keys = chats_data.get(chat_id_cif, {})
+        chat_keys = data['data'].get('chats', {}).get(chat_id_cif, {})
+        private_age_key = build_candidate_privates(chat_keys, metadata_plain.get('kids', []))
         
-        private = build_candidate_privates(chat_keys, kids)
-        if not private:
-            raise HTTPException(status_code=400, detail="Nessuna chiave disponibile")
+        if not private_age_key:
+            raise HTTPException(status_code=403, detail="Non possiedi la chiave per decifrare questo file")
 
-        inner_metadata_decrypted = decrypt_with_age(encrypted_inner_metadata, private)
-        if not inner_metadata_decrypted:
-            raise HTTPException(status_code=400, detail="Impossibile decifrare i metadati interni")
-            
-        inner_metadata = json.loads(inner_metadata_decrypted)
+        inner_meta_dec = decrypt_with_age(metadata_plain['text'], private_age_key)
+        if not inner_meta_dec:
+            raise HTTPException(status_code=400, detail="Decifratura metadati fallita")
         
-        if (metadata_plain.get('id') != inner_metadata.get('id') or
-            metadata_plain.get('seq') != inner_metadata.get('seq') or
-            metadata_plain.get('kid') != inner_metadata.get('kid') or
-            metadata_plain.get('sign') != inner_metadata.get('sign')):
-            raise HTTPException(status_code=400, detail="Metadati non coerenti: Possibile manomissione")
+        inner_metadata = json.loads(inner_meta_dec)
         
-        plain_text = inner_metadata.get('text')
-
-        firma, sign_error = verify_signed_payload(
-            message.sender_id,
-            mess_decrypted_id_caption,
-            kid,
-            kid_cif,
-            seq,
-            cif_flag,
-            sign,
-            chat_id,
-            data,
-            my_id,
-            chat_vault,
-            kids,
-            text=plain_text
-        )
-        if not firma:
-            raise HTTPException(status_code=400, detail=f"Firma messaggio non valida: {sign_error}")
-
-        decrypted_payload = decrypt_with_age(mess['file'], private, False)
-        if not decrypted_payload:
-            raise HTTPException(status_code=400, detail="Impossibile decifrare il file")
-
-        file_sign = inner_metadata.get('file_sign')
-        if not file_sign:
-            raise HTTPException(status_code=400, detail="Firma del file mancante nei metadati")
-
-        file_firma, file_sign_error = verify_signed_payload(
-            message.sender_id,
-            None, 
-            kid,
-            kid_cif,
-            None, 
-            None,
-            file_sign, 
-            chat_id,
-            data,
-            my_id,
-            chat_vault,
-            kids,
-            file=decrypted_payload
-        )
-        if not file_firma:
-            raise HTTPException(status_code=400, detail=f"Firma del file non valida: {file_sign_error}")
-
-        out_filename = os.path.basename(inner_metadata.get('filename') or 'file.bin')
-        mime_type = inner_metadata.get('mime') or mimetypes.guess_type(out_filename)[0] or 'application/octet-stream'
-
-        if isinstance(decrypted_payload, (bytes, bytearray)):
-            payload_iter = iter([decrypted_payload])
+        if is_group_chat_id(chat_id):
+            _, chat_vault = get_gruppo_vault(username, chat_id, entity, data)
         else:
-            payload_iter = iter(decrypted_payload)
+            _, chat_vault = await get_chat_vault(username, chat_id, client, data)
+
+        firma_ok, _ = verify_signed_payload(
+            message.sender_id, metadata_plain['id'], metadata_plain['kid'], 
+            metadata_plain['kid_cif'], metadata_plain['seq'], "file", 
+            metadata_plain['sign'], chat_id, data, my_id, chat_vault, 
+            metadata_plain['kids'], text=inner_metadata.get('text')
+        )
+        
+        if not firma_ok:
+            raise HTTPException(status_code=403, detail="Firma non valida: il file potrebbe essere stato manomesso")
+
+        out_filename = inner_metadata.get('filename') or 'file.bin'
+        mime_type = inner_metadata.get('mime') or 'application/octet-stream'
+        encrypted_data_offset = 4 + meta_size
+
+        async def stream_decrypted_file():
+            with tempfile.NamedTemporaryFile(mode='w', delete=False) as key_file:
+                key_file.write(private_age_key)
+                key_path = key_file.name
+
+            proc = await asyncio.create_subprocess_exec(
+                'age', '-d', '-i', key_path,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            try:
+                async def feed_input():
+                    try:
+                        async for chunk in client.iter_download(message.document, offset=encrypted_data_offset):
+                            proc.stdin.write(chunk)
+                            await proc.stdin.drain()
+                        proc.stdin.close()
+                    except Exception:
+                        proc.stdin.close()
+
+                input_task = asyncio.create_task(feed_input())
+
+                while True:
+                    chunk = await proc.stdout.read(65536) # Chunk da 64KB
+                    if not chunk:
+                        break
+                    yield chunk
+
+                await input_task
+                await proc.wait()
+            finally:
+                if os.path.exists(key_path):
+                    os.remove(key_path)
+                if proc.returncode != 0:
+                    err = await proc.stderr.read()
+                    print(f"Age error: {err.decode()}")
 
         return StreamingResponse(
-            payload_iter,
+            stream_decrypted_file(),
             media_type=mime_type,
             headers={
                 'Content-Disposition': f'attachment; filename="{out_filename}"',
+                'Content-Length': str(inner_metadata.get('size', '')),
                 'Cache-Control': 'no-store'
             }
         )
+
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Errore download: {str(e)}")
+        print(f"Errore nel download: {e}")
+        raise HTTPException(status_code=502, detail=f"Errore durante lo streaming del file: {str(e)}")
