@@ -1,12 +1,7 @@
-from routes_handler import router as r
 from fastapi import FastAPI
 from database import sqlite as db_setup
 from routes_handler import router as api_router
 from fastapi.middleware.cors import CORSMiddleware
-
-
-
-
 
 app = FastAPI()
 

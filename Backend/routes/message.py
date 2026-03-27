@@ -8,6 +8,7 @@ from utils import  is_logged_in, split_message, get_current_local_age_key, ensur
 from telethon.tl.types import DocumentAttributeFilename
 from FastTelethonhelper import fast_upload
 from realtime import broadcast_event 
+from config import UPLOAD_DIR
 
 router = APIRouter()
 
@@ -110,7 +111,6 @@ async def process_file_upload_task(
                 tmp_final_path = tmp_final.name
                 tmp_final.write(len(meta_bytes).to_bytes(4, byteorder='big'))
                 tmp_final.write(meta_bytes)
-                # Copiamo il file cifrato a chunk nel file finale
                 with open(tmp_age_path, 'rb') as f_age:
                     shutil.copyfileobj(f_age, tmp_final)
 
@@ -127,8 +127,6 @@ async def process_file_upload_task(
         await broadcast_event(temp_session_id, chat_id, {"event_type": "upload_error", "chat_id": chat_id, "temp_msg_id": temp_msg_id, "error": str(e)})
     finally:
         if os.path.exists(tmp_in_path): os.remove(tmp_in_path)
-
-
 
 @router.post("/messages/send/file")
 async def s_file(
@@ -147,20 +145,27 @@ async def s_file(
     if not client.is_connected():
         await client.connect()
 
-    ext = os.path.splitext(file.filename)[1]
-    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-        tmp_in_path = tmp.name
-        
-    with open(tmp_in_path, "wb") as buffer:
-        while True:
-            chunk = await file.read(2 * 1024 * 1024) # Legge 2 MB alla volta
-            if not chunk:
-                break
-            buffer.write(chunk)
+    file_extension = os.path.splitext(file.filename)[1]
+    local_filename = f"upload_{secrets.token_hex(8)}{file_extension}"
+    tmp_in_path = os.path.join(UPLOAD_DIR, local_filename)
+
+    try:
+        with open(tmp_in_path, "wb") as buffer:
+            while True:
+                chunk = await file.read(1024 * 1024) 
+                if not chunk:
+                    break
+                buffer.write(chunk)
+    except Exception as e:
+        if os.path.exists(tmp_in_path):
+            os.remove(tmp_in_path)
+        raise HTTPException(status_code=500, detail=f"Errore scrittura disco: {e}")
 
     background_tasks.add_task(
         process_file_upload_task,
-        tmp_in_path, file.filename, file.content_type, 
+        tmp_in_path,
+        file.filename, 
+        file.content_type, 
         chat_id, text, cryph, group, 
         temp_msg_id, temp_session_id, login_session, 
         data, client
