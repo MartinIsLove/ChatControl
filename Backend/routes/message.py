@@ -181,13 +181,16 @@ async def s_message( message: message, login_session: str = Cookie(None)):
         await client.connect()
 
     if not message.cryph:
+        
         try:
             if len(message.text)>4096:
                 splitted_text = split_message(message.text)
                 for text in splitted_text:
                     await client.send_message(message.chat_id, text)
+                return {"status": "ok"} # <-- Aggiungi questo return
             else:
-                await client.send_message(message.chat_id, message.text)
+                sent_msg = await client.send_message(message.chat_id, message.text)
+                return {"status": "ok", "message_id": sent_msg.id}
 
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
@@ -302,22 +305,22 @@ async def s_message( message: message, login_session: str = Cookie(None)):
 
             try:
                 file_in_ram.seek(0)
-                await client.send_file(
+                sent_msg = await client.send_file(
                     message.chat_id,
                     file_in_ram,
                     caption=json.dumps(caption),
                     force_document=True,
                     attributes=[DocumentAttributeFilename(nome_file)]
                 )
-                return {"status": "ok"}
+                return {"status": "ok", "message_id": getattr(sent_msg, 'id', None)}
             except Exception as e:
                 raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
             
         try:
-            await client.send_message(message.chat_id, json.dumps(finale))
+            sent_msg = await client.send_message(message.chat_id, json.dumps(finale))
+            return {"status": "ok", "message_id": getattr(sent_msg, 'id', None)}
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Invio fallito: {e}")
-    return {"status":"ok"}
 
 @router.post("/messages/initializing")
 async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):

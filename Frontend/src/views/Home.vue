@@ -114,7 +114,10 @@
               const hasFile = !!message.file
 
               return list.findIndex((m) => {
-                if (!m?.pending || !m?.out) return false
+                // MODIFICA: Accetta il match se è "pending" OPPURE se ha ancora un ID temporaneo
+                const isTempId = String(m?.id).startsWith('tmp-');
+                if (!(m?.pending || isTempId) || !m?.out) return false;
+                
                 if (!!m.file !== hasFile) return false
                 if ((m.text || '').trim() !== normalizedText) return false
                 if (hasFile && (m.filename || '') !== (message.filename || '')) return false
@@ -163,7 +166,6 @@
               if (payload.event_type === 'upload_success') {
                 console.log("[WS] Upload completato con successo per:", payload.temp_msg_id)
                 this.replaceOptimisticId(payload.temp_msg_id, payload.message_id)
-                this.queueRealtimeReload() // Ricarichiamo la chat per avere formattazione corretta
                 return
               }
               if (payload.event_type === 'upload_error') {
@@ -575,15 +577,19 @@
                   await api.post('/messages/send/file', formData, { withCredentials: true })
                 }
                 else if(outgoingText.trim().length !== 0){
-                  await api.post('/messages/send', {
+                  const resp = await api.post('/messages/send', {
                     text: outgoingText,
                     chat_id: this.selectedChat.id,
                     cryph: false,
                     group: this.selectedChat.is_group
                   }, { withCredentials: true })
                   
+                  if (resp.data && resp.data.message_id) {
+                    this.replaceOptimisticId(optimisticId, resp.data.message_id)
+                  } else {
+                    this.resolveOptimisticMessage(optimisticId)
+                  }
                 }
-                this.resolveOptimisticMessage(optimisticId)
               } catch (e) {
                   this.errormsg = e.response?.data?.detail || e.message
                   this.failOptimisticMessage(optimisticId, this.errormsg)
@@ -611,7 +617,6 @@
               if (!this.selectedChat) {
                 return
               }
-              // Blocca solo il messaggio cifrato vuoto senza file.
               if (this.sendingMessage || this.sendingEncryptedFile || (!this.file && !this.text.trim())) return;
 
               this.sendingMessage = true
@@ -630,13 +635,19 @@
 
               if (!outgoingFile && outgoingText.trim().length !== 0){
                 try {
-                    await api.post('/messages/send', {
+                    const resp = await api.post('/messages/send', {
                       text: outgoingText,
                       chat_id: this.selectedChat.id,
                       cryph: true,
                       group: this.selectedChat.is_group
                     }, { withCredentials: true })
-                    this.resolveOptimisticMessage(optimisticId)
+                    
+                    // MODIFICA: Aggiorna l'ID se presente, altrimenti risolvi normalmente
+                    if (resp.data && resp.data.message_id) {
+                      this.replaceOptimisticId(optimisticId, resp.data.message_id)
+                    } else {
+                      this.resolveOptimisticMessage(optimisticId)
+                    }
                     this.scrollToBottom()
                 } catch (e) {
                     this.errormsg = e.response?.data?.message || e.message

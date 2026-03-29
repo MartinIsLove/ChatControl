@@ -251,6 +251,7 @@ def encrypt_file_with_age(src_path: str, dest_path: str, public_keys: list):
         return True
     except Exception:
         return False
+
 def get_file_sha256(file_path: str):
     sha256_hash = hashlib.sha256()
     with open(file_path, "rb") as f:
