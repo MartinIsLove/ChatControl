@@ -6,12 +6,14 @@ from cryptography_ import encrypt_with_age, genera_chiavi, encrypt_vault, derive
 from databaseInteractions import get_chat_chyper_keys, get_group_chyper_keys, set_user_vault
 from utils import  is_logged_in, split_message, get_current_local_age_key, ensure_chat_seq, wait_for_public_key_message
 from telethon.tl.types import DocumentAttributeFilename
-from FastTelethonhelper import fast_upload
+import FastTelethonhelper
 from realtime import broadcast_event 
 from config import UPLOAD_DIR
 
 router = APIRouter()
 
+MAX_MESSAGE_LIMIT = 10000
+FILE_DIMENSION_LIMIT = 1073741824
 MESSAGE_LIMIT = 4096
 PUBLIC_KEY_COOLDOWN = 0
 
@@ -65,10 +67,17 @@ async def process_file_upload_task(
 ):
     try:
         chat_id_hash = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
+        threshold_bytes = 2097152 
         
+
         if not cryph:
-            uploaded_file = await fast_upload(client, tmp_in_path)
-            sent_msg = await client.send_file(chat_id, uploaded_file, caption=text, force_document=True, attributes=[DocumentAttributeFilename(original_filename)])
+            size = os.path.getsize(tmp_in_path)
+            if size < threshold_bytes:
+                sent_msg = await client.send_file(chat_id, tmp_in_path, caption=text, force_document=True, attributes=[DocumentAttributeFilename(original_filename)])
+            else:
+                uploaded = await getattr(FastTelethonhelper, 'fast_upload')(client, tmp_in_path)
+                sent_msg = await client.send_file(chat_id, uploaded, caption=text, force_document=True, attributes=[DocumentAttributeFilename(original_filename)])
+
             sent_id = getattr(sent_msg, 'id', None)
         else:
             id_mess = secrets.token_hex(16)
@@ -115,8 +124,14 @@ async def process_file_upload_task(
                     shutil.copyfileobj(f_age, tmp_final)
 
             try:
-                uploaded_file = await fast_upload(client, tmp_final_path)
-                sent_msg = await client.send_file(chat_id, uploaded_file, caption=json.dumps({"cif":"file"}), force_document=True, attributes=[DocumentAttributeFilename(f"{secrets.token_hex(8)}.dat")])
+                final_size = os.path.getsize(tmp_final_path)
+
+                if final_size < threshold_bytes:
+                    sent_msg = await client.send_file(chat_id, tmp_final_path, caption=json.dumps({"cif":"file"}), force_document=True, attributes=[DocumentAttributeFilename(f"{secrets.token_hex(8)}.dat")])
+                else:
+                    uploaded = await getattr(FastTelethonhelper, 'fast_upload')(client, tmp_final_path)
+                    sent_msg = await client.send_file(chat_id, uploaded, caption=json.dumps({"cif":"file"}), force_document=True, attributes=[DocumentAttributeFilename(f"{secrets.token_hex(8)}.dat")])
+
                 sent_id = getattr(sent_msg, 'id', None)
             finally:
                 for p in [tmp_age_path, tmp_final_path]:
@@ -145,25 +160,38 @@ async def s_file(
     if not client.is_connected():
         await client.connect()
 
+    if len(text) > MAX_MESSAGE_LIMIT:
+        raise HTTPException(status_code=413, detail="caption troppo lunga")
+ 
     file_extension = os.path.splitext(file.filename)[1]
     local_filename = f"upload_{secrets.token_hex(8)}{file_extension}"
-    tmp_in_path = os.path.join(UPLOAD_DIR, local_filename)
+    tmp_path = os.path.join(UPLOAD_DIR, local_filename)
 
     try:
-        with open(tmp_in_path, "wb") as buffer:
+        with open(tmp_path, "wb") as buffer:
             while True:
                 chunk = await file.read(1024 * 1024) 
                 if not chunk:
                     break
                 buffer.write(chunk)
     except Exception as e:
-        if os.path.exists(tmp_in_path):
-            os.remove(tmp_in_path)
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
         raise HTTPException(status_code=500, detail=f"Errore scrittura disco: {e}")
+
+    try:
+        size = os.path.getsize(tmp_path)
+    except Exception:
+        size = 0
+
+    if size > FILE_DIMENSION_LIMIT:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise HTTPException(status_code=413, detail="File troppo grande per essere processato")
 
     background_tasks.add_task(
         process_file_upload_task,
-        tmp_in_path,
+        tmp_path,
         file.filename, 
         file.content_type, 
         chat_id, text, cryph, group, 
@@ -187,7 +215,7 @@ async def s_message( message: message, login_session: str = Cookie(None)):
                 splitted_text = split_message(message.text)
                 for text in splitted_text:
                     await client.send_message(message.chat_id, text)
-                return {"status": "ok"} # <-- Aggiungi questo return
+                return {"status": "ok"}
             else:
                 sent_msg = await client.send_message(message.chat_id, message.text)
                 return {"status": "ok", "message_id": sent_msg.id}

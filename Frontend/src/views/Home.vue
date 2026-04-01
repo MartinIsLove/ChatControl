@@ -920,10 +920,8 @@
                 const encryptedUrl = `${__API_URL__}/media/cifrato/download/${this.selectedChat.id}/${message.id}`
                 const plainUrl = `${__API_URL__}/media/download/${this.selectedChat.id}/${message.id}`
 
-                let result = await tryDownload(encryptedUrl)
-                if (!result.ok) {
-                  result = await tryDownload(plainUrl)
-                }
+                  const mustUseEncrypted = Boolean(message?.secure) || this.isEncryptedPayload(message)
+                  let result = await tryDownload(mustUseEncrypted ? encryptedUrl : plainUrl)
                 if (!result.ok) {
                   this.errormsg = `Download fallito (${result.status})`
                 }

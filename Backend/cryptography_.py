@@ -276,6 +276,39 @@ def calculate_message_sign_stream(private_key_b64url: str, seq=None, kid=None, k
         return _b64url(signature)
     except Exception:
         return None
+
+def verify_message_sign_stream(public_key_b64url: str, signature_b64url: str, seq=None, kid=None, kid_cif=None, message_id=None, cif=None, kids=None, text=None, file_hash: bytes = None, identity=None) -> bool:
+    try:
+        public_key_raw = _b64url_decode(public_key_b64url.strip())
+        if len(public_key_raw) != 32:
+            raise ValueError("La chiave pubblica di firma deve essere lunga 32 byte")
+
+        signature_raw = _b64url_decode(signature_b64url.strip())
+
+        if identity:
+            payload = {"seq": seq, "kid": kid.strip(), "kid_cif": kid_cif.strip(), "id": message_id.strip()}
+        elif file_hash is not None:
+            payload = {"file_hash": _b64url(file_hash)}
+        else:
+            sanitized_kids = [str(k).strip() for k in kids] if kids else []
+            payload = {
+                "seq": seq,
+                "kid": kid.strip(),
+                "kid_cif": kid_cif.strip(),
+                "id": message_id.strip(),
+                "cif": cif.strip(),
+                "kids": sanitized_kids,
+                "text": text,
+            }
+
+        payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        verifier = Ed25519PublicKey.from_public_bytes(public_key_raw)
+        verifier.verify(signature_raw, payload_bytes)
+        return True
+    except InvalidSignature:
+        return False
+    except Exception:
+        return False
     
 def genera_chiavi():
     try:

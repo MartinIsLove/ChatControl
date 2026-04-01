@@ -4,7 +4,7 @@ from datetime import datetime
 from database.sqlite import get_connection, db_lock
 from config import pepper
 from databaseInteractions import store_public_key_in_vault, get_gruppo_vault, get_chat_vault, chats_vault_update, set_user_vault
-from cryptography_ import verify_message_sign, decrypt_with_age, calculate_message_sign, encrypt_vault
+from cryptography_ import verify_message_sign, decrypt_with_age, calculate_message_sign, encrypt_vault, calculate_message_sign_stream, verify_message_sign_stream
 from utils import is_logged_in, is_valid_age_public_key, is_group_chat_id, build_candidate_privates, set_media
 from realtime import connect_socket, disconnect_socket, register_telethon_handlers, index_messages
 from telethon.tl.types import MessageService, MessageActionChatCreate, MessageActionChatDeleteUser, MessageActionChatAddUser, MessageActionPinMessage
@@ -62,6 +62,34 @@ def verify_signed_payload(sender_id, payload_id, payload_kid, payload_kid_cif, p
         except ValueError:
             return False, "questo messaggio/file e' stato modificato"
 
+def verify_file_hash_signature(sender_id, payload_kid, payload_sign, chat_id, data, my_id, chat_vault, file_hash: bytes):
+        chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
+        if my_id and sender_id == my_id:
+            local_kid_map = data.get('data', {}).get('chats', {}).get(chat_id_cif, {}).get('kid', {})
+            sign_private = local_kid_map.get(payload_kid) if isinstance(local_kid_map, dict) else None
+            if not sign_private:
+                return False, "chiave di firma locale non disponibile"
+            expected_sign = calculate_message_sign_stream(sign_private, file_hash=file_hash)
+            if not expected_sign:
+                return False, "firma file non verificabile"
+            return (payload_sign == expected_sign), "firma file non valida"
+
+        user_str = str(sender_id)
+        if is_group_chat_id(chat_id):
+            participant_data = chat_vault.get('partecipanti', {}).get(user_str)
+            if participant_data is None and isinstance(chat_vault, dict):
+                participant_data = chat_vault.get(sender_id)
+            signing_keys = participant_data.get('chiavi_firma', {}) if participant_data else {}
+        else:
+            signing_keys = chat_vault.get('chiavi_firma', {})
+
+        if payload_kid not in signing_keys:
+            return False, "chiave di firma mittente non disponibile"
+
+        pub_sign = signing_keys.get(payload_kid)
+        is_valid = verify_message_sign_stream(pub_sign, payload_sign, file_hash=file_hash)
+        return is_valid, "firma file non valida"
+
 @router.websocket("/ws/chats/{chat_id}")
 async def chat_events(websocket: WebSocket, chat_id: int):
     login_session = websocket.cookies.get("login_session")
@@ -117,9 +145,6 @@ async def get_chats(login_session: str = Cookie(None)):
         chats.append(chat_info)
         
     username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
-
-    ''' la parte di codice sottostante serve per capire se la chat contiene gia' delle chiavi pubbliche 
-        inizializzate dal nostro dispositivo, oppure no'''
     
     try:
         with db_lock, get_connection() as conn:
@@ -566,6 +591,14 @@ async def download_media(chat_id: int, message_id: int, login_session: str = Coo
                 status_code=404,
                 detail=f"Messaggio senza media (chat_id={chat_id}, message_id={message_id})"
             )
+
+        if message.document:
+            filename_attr = next((attr.file_name for attr in message.document.attributes if hasattr(attr, 'file_name')), None)
+            if filename_attr and filename_attr.endswith('.dat'):
+                raise HTTPException(
+                    status_code=403,
+                    detail="File cifrato: usa il download sicuro con verifica integrita'"
+                )
         
         file_bytes = io.BytesIO()
         await client.download_media(message, file=file_bytes)
@@ -596,14 +629,14 @@ async def download_media(chat_id: int, message_id: int, login_session: str = Coo
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Errore download: {str(e)}")
-    
+ 
 @router.get("/media/cifrato/download/{chat_id}/{message_id}")
 async def download_encrypt_media(chat_id: int, message_id: int, login_session: str = Cookie(None)):
     _, data = is_logged_in(login_session, True)
     client = data['client']
     if not client.is_connected():
         await client.connect()
-    
+
     try:
         username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
         me = await client.get_me()
@@ -615,7 +648,6 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
         if not message or not message.media or not message.document:
             raise HTTPException(status_code=404, detail="File non trovato")
 
-        # 2. Verifica che sia un file cifrato (.dat)
         filename_attr = next((attr.file_name for attr in message.document.attributes if hasattr(attr, 'file_name')), None)
         if not filename_attr or not filename_attr.endswith('.dat'):
             raise HTTPException(status_code=400, detail="Il documento non è nel formato cifrato atteso")
@@ -639,16 +671,42 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
 
         chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
         chat_keys = data['data'].get('chats', {}).get(chat_id_cif, {})
-        private_age_key = build_candidate_privates(chat_keys, metadata_plain.get('kids', []))
-        
+        msg_id = metadata_plain.get('id')
+        seq = metadata_plain.get('seq')
+        kid = metadata_plain.get('kid')
+        kid_cif = metadata_plain.get('kid_cif')
+        sign = metadata_plain.get('sign')
+        kids = metadata_plain.get('kids')
+        encrypted_inner_metadata = metadata_plain.get('text')
+
+        if any(t is None for t in (seq, kid, kid_cif, sign, msg_id, kids, encrypted_inner_metadata)):
+            raise HTTPException(status_code=400, detail="Metadati mancanti o incompleti")
+
+        private_age_key = build_candidate_privates(chat_keys, kids)
+
         if not private_age_key:
             raise HTTPException(status_code=403, detail="Non possiedi la chiave per decifrare questo file")
 
-        inner_meta_dec = decrypt_with_age(metadata_plain['text'], private_age_key)
+        inner_meta_dec = decrypt_with_age(encrypted_inner_metadata, private_age_key)
         if not inner_meta_dec:
             raise HTTPException(status_code=400, detail="Decifratura metadati fallita")
-        
-        inner_metadata = json.loads(inner_meta_dec)
+
+        try:
+            inner_metadata = json.loads(inner_meta_dec)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Impossibile leggere i metadati interni")
+
+        # Verifiche di coerenza dei metadati (stesso controllo presente in messages_handler.handle_file)
+        if (inner_metadata.get('cif') != "file" or
+            inner_metadata.get('id') != msg_id or
+            inner_metadata.get('seq') != seq or
+            inner_metadata.get('kid') != kid or
+            inner_metadata.get('sign') != sign):
+            raise HTTPException(status_code=400, detail="Metadati incongruenti o manomessi")
+
+        file_sign = inner_metadata.get('file_sign')
+        if not file_sign:
+            raise HTTPException(status_code=400, detail="Metadati file incompleti: firma finale assente")
         
         if is_group_chat_id(chat_id):
             _, chat_vault = get_gruppo_vault(username, chat_id, entity, data)
@@ -663,25 +721,30 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
         )
         
         if not firma_ok:
-            raise HTTPException(status_code=403, detail="Firma non valida: il file potrebbe essere stato manomesso")
-
+            raise HTTPException(status_code=403, detail="Firma metadati non valida: il file potrebbe essere stato manomesso")
         out_filename = inner_metadata.get('filename') or 'file.bin'
         mime_type = inner_metadata.get('mime') or 'application/octet-stream'
         encrypted_data_offset = 4 + meta_size
 
         async def stream_decrypted_file():
-            with tempfile.NamedTemporaryFile(mode='w', delete=False) as key_file:
-                key_file.write(private_age_key)
-                key_path = key_file.name
-
-            proc = await asyncio.create_subprocess_exec(
-                'age', '-d', '-i', key_path,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-
+            decrypted_tmp_path = None
+            key_path = None
             try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp_out:
+                    decrypted_tmp_path = tmp_out.name
+
+                with tempfile.NamedTemporaryFile(mode='w', delete=False) as key_file:
+                    key_file.write(private_age_key)
+                    key_path = key_file.name
+
+                file_hash = hashlib.sha256()
+                proc = await asyncio.create_subprocess_exec(
+                    'age', '-d', '-i', key_path,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+
                 async def feed_input():
                     try:
                         async for chunk in client.iter_download(message.document, offset=encrypted_data_offset):
@@ -693,20 +756,45 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
 
                 input_task = asyncio.create_task(feed_input())
 
-                while True:
-                    chunk = await proc.stdout.read(65536) # Chunk da 64KB
-                    if not chunk:
-                        break
-                    yield chunk
+                with open(decrypted_tmp_path, 'wb') as out_f:
+                    while True:
+                        chunk = await proc.stdout.read(65536)
+                        if not chunk:
+                            break
+                        file_hash.update(chunk)
+                        out_f.write(chunk)
 
                 await input_task
                 await proc.wait()
-            finally:
-                if os.path.exists(key_path):
-                    os.remove(key_path)
+
                 if proc.returncode != 0:
                     err = await proc.stderr.read()
-                    print(f"Age error: {err.decode()}")
+                    raise RuntimeError(f"Decifratura file fallita: {err.decode().strip()}")
+
+                file_sign_ok, file_sign_error = verify_file_hash_signature(
+                    message.sender_id,
+                    metadata_plain['kid'],
+                    file_sign,
+                    chat_id,
+                    data,
+                    my_id,
+                    chat_vault,
+                    file_hash.digest(),
+                )
+                if not file_sign_ok:
+                    raise RuntimeError(file_sign_error)
+
+                with open(decrypted_tmp_path, 'rb') as in_f:
+                    while True:
+                        chunk = in_f.read(65536)
+                        if not chunk:
+                            break
+                        yield chunk
+            finally:
+                if key_path and os.path.exists(key_path):
+                    os.remove(key_path)
+                if decrypted_tmp_path and os.path.exists(decrypted_tmp_path):
+                    os.remove(decrypted_tmp_path)
 
         return StreamingResponse(
             stream_decrypted_file(),
@@ -718,6 +806,8 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
             }
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Errore nel download: {e}")
         raise HTTPException(status_code=502, detail=f"Errore durante lo streaming del file: {str(e)}")
