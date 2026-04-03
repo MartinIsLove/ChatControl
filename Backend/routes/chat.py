@@ -10,6 +10,7 @@ from realtime import connect_socket, disconnect_socket, register_telethon_handle
 from telethon.tl.types import MessageService, MessageActionChatCreate, MessageActionChatDeleteUser, MessageActionChatAddUser, MessageActionPinMessage
 from fastapi.responses import StreamingResponse
 from messages_handler import handle_in, handle_file, handle_on, handle_message
+import FastTelethonhelper
 
 router = APIRouter()
 
@@ -387,7 +388,6 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
             'sender_id': msg.sender_id,
             'sender_username': getattr(sender, 'username', None) if sender else None,
             'out': msg.out,
-            'reply_to': msg.reply_to.reply_to_msg_id if msg.reply_to else None,
             'system_type': system_message,
         }
         
@@ -600,9 +600,10 @@ async def download_media(chat_id: int, message_id: int, login_session: str = Coo
                     detail="File cifrato: usa il download sicuro con verifica integrita'"
                 )
         
-        file_bytes = io.BytesIO()
-        await client.download_media(message, file=file_bytes)
-        file_bytes.seek(0)
+        async def stream_media_chunks():
+            async for chunk in client.iter_download(message.media, request_size=64 * 1024):
+                if chunk:
+                    yield chunk
         
         mime_type = 'application/octet-stream'
         
@@ -618,7 +619,7 @@ async def download_media(chat_id: int, message_id: int, login_session: str = Coo
             mime_type = message.document.mime_type or 'application/octet-stream'
 
         return StreamingResponse(
-            iter([file_bytes.getvalue()]),
+            stream_media_chunks(),
             media_type=mime_type,
             headers={
                 'Cache-Control': 'public, max-age=31536000',
@@ -632,6 +633,7 @@ async def download_media(chat_id: int, message_id: int, login_session: str = Coo
  
 @router.get("/media/cifrato/download/{chat_id}/{message_id}")
 async def download_encrypt_media(chat_id: int, message_id: int, login_session: str = Cookie(None)):
+    encrypted_tmp_path = None
     _, data = is_logged_in(login_session, True)
     client = data['client']
     if not client.is_connected():
@@ -652,20 +654,37 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
         if not filename_attr or not filename_attr.endswith('.dat'):
             raise HTTPException(status_code=400, detail="Il documento non è nel formato cifrato atteso")
 
-        head_chunk = b""
-        async for chunk in client.iter_download(message.document, limit=128 * 1024):
-            head_chunk += chunk
-            if len(head_chunk) > 4:
-                meta_size = int.from_bytes(head_chunk[:4], byteorder='big')
-                if len(head_chunk) >= 4 + meta_size:
-                    break
-        
-        if len(head_chunk) < 4:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".dat") as tmp_enc:
+            encrypted_tmp_path = tmp_enc.name
+
+        threshold_bytes = 30 * 1024
+        document_size = getattr(message.document, 'size', 0) or 0
+        fast_download = getattr(FastTelethonhelper, 'fast_download', None)
+        if document_size < threshold_bytes:
+            if callable(fast_download):
+                try:
+                    await fast_download(client, message.document, encrypted_tmp_path)
+                except TypeError:
+                    await fast_download(client, message.document, file=encrypted_tmp_path)
+                except Exception:
+                    await client.download_media(message, file=encrypted_tmp_path)
+            else:
+                await client.download_media(message, file=encrypted_tmp_path)
+        else:
+            await client.download_media(message, file=encrypted_tmp_path)
+
+        with open(encrypted_tmp_path, 'rb') as encrypted_in:
+            prefix = encrypted_in.read(4)
+            if len(prefix) < 4:
+                raise HTTPException(status_code=400, detail="File corrotto")
+            meta_size = int.from_bytes(prefix, byteorder='big')
+            metadata_bytes = encrypted_in.read(meta_size)
+
+        if len(metadata_bytes) != meta_size:
             raise HTTPException(status_code=400, detail="File corrotto")
 
-        meta_size = int.from_bytes(head_chunk[:4], byteorder='big')
         try:
-            metadata_plain = json.loads(head_chunk[4:4+meta_size].decode('utf-8'))
+            metadata_plain = json.loads(metadata_bytes.decode('utf-8'))
         except Exception:
             raise HTTPException(status_code=400, detail="Impossibile leggere i metadati")
 
@@ -696,7 +715,6 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
         except Exception:
             raise HTTPException(status_code=400, detail="Impossibile leggere i metadati interni")
 
-        # Verifiche di coerenza dei metadati (stesso controllo presente in messages_handler.handle_file)
         if (inner_metadata.get('cif') != "file" or
             inner_metadata.get('id') != msg_id or
             inner_metadata.get('seq') != seq or
@@ -747,9 +765,14 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
 
                 async def feed_input():
                     try:
-                        async for chunk in client.iter_download(message.document, offset=encrypted_data_offset):
-                            proc.stdin.write(chunk)
-                            await proc.stdin.drain()
+                        with open(encrypted_tmp_path, 'rb') as encrypted_in:
+                            encrypted_in.seek(encrypted_data_offset)
+                            while True:
+                                chunk = encrypted_in.read(65536)
+                                if not chunk:
+                                    break
+                                proc.stdin.write(chunk)
+                                await proc.stdin.drain()
                         proc.stdin.close()
                     except Exception:
                         proc.stdin.close()
@@ -795,6 +818,8 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
                     os.remove(key_path)
                 if decrypted_tmp_path and os.path.exists(decrypted_tmp_path):
                     os.remove(decrypted_tmp_path)
+                if encrypted_tmp_path and os.path.exists(encrypted_tmp_path):
+                    os.remove(encrypted_tmp_path)
 
         return StreamingResponse(
             stream_decrypted_file(),
@@ -807,7 +832,11 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
         )
 
     except HTTPException:
+        if encrypted_tmp_path and os.path.exists(encrypted_tmp_path):
+            os.remove(encrypted_tmp_path)
         raise
     except Exception as e:
+        if encrypted_tmp_path and os.path.exists(encrypted_tmp_path):
+            os.remove(encrypted_tmp_path)
         print(f"Errore nel download: {e}")
         raise HTTPException(status_code=502, detail=f"Errore durante lo streaming del file: {str(e)}")

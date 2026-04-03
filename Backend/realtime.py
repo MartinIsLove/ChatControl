@@ -288,7 +288,6 @@ def _serialize_message(msg):
         "date": msg.date if msg.date else None,
         "sender_id": msg.sender_id,
         "out": msg.out,
-        "reply_to": msg.reply_to.reply_to_msg_id if msg.reply_to else None,
     }
     if msg.media:
         set_media(msg, mess_data)

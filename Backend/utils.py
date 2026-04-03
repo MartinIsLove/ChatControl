@@ -8,7 +8,7 @@ from pydantic import BaseModel
 SECRET_KEY = secret_key.decode()
 cipher = Fernet(SECRET_KEY)
 MESSAGE_LIMIT = 4096
-SESSION_TIMEOUT = 10000 # 1200
+SESSION_TIMEOUT = 1200
 
 login_cache = {}
 

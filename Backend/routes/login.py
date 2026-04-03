@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Response, Cookie, HTTPException
+from fastapi import APIRouter, Response, Cookie, HTTPException, Request
 from pydantic import BaseModel
 import secrets, time, hashlib
 from config import pepper
@@ -8,8 +8,9 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 from databaseInteractions import get_user_informations, set_user_vault
-
+from login_control import _register_login_failure, _enforce_login_rate_limit, _reset_login_rate_limit
 router = APIRouter()
+
 
 class login_user(BaseModel):
     username: str
@@ -20,57 +21,66 @@ class code(BaseModel):
     password: str
 
 @router.post("/login")
-async def login_user(credentials: login_user, response: Response):
+async def login_user(credentials: login_user, response: Response, request: Request):
 
+    client_ip = request.client.host if request.client else "unknown"
+    _enforce_login_rate_limit(client_ip)
 
-    
-    username = hashlib.sha256(pepper.encode() + credentials.username.encode()).hexdigest()
-    temp_id = secrets.token_hex(16)
-    temp_id_encrypted = cipher.encrypt(temp_id.encode()).decode()
-    
-    vault_decyphered, masterkey= get_user_informations(username, credentials.password)
-    
-    if 'chats' not in vault_decyphered:
-        vault_decyphered['chats'] = {}
-    
-    client = TelegramClient(StringSession(vault_decyphered['session']), vault_decyphered['api_id'], vault_decyphered['api_hash'])
-    vault_decyphered['masterkey'] =  masterkey
-    global login_cache
-    login_cache[temp_id] = {
-        "data": vault_decyphered,
-        "time": time.time(),
-        "client": client
-    }
+    try:
+        username = hashlib.sha256(pepper.encode() + credentials.username.encode()).hexdigest()
+        temp_id = secrets.token_hex(16)
+        temp_id_encrypted = cipher.encrypt(temp_id.encode()).decode()
 
-    response.set_cookie(
-        key="login_session",
-        value=temp_id_encrypted,
-        httponly=True,
-        secure=True,
-        samesite="strict",
-    )
+        vault_decyphered, masterkey= get_user_informations(username, credentials.password)
 
-    await client.connect()
+        if 'chats' not in vault_decyphered:
+            vault_decyphered['chats'] = {}
 
-    if not await client.is_user_authorized():
-        try:
-            await client.disconnect()
-            client = TelegramClient(StringSession(), vault_decyphered['api_id'], vault_decyphered['api_hash'])
-            await client.connect()
+        client = TelegramClient(StringSession(vault_decyphered['session']), vault_decyphered['api_id'], vault_decyphered['api_hash'])
+        vault_decyphered['masterkey'] =  masterkey
+        global login_cache
+        login_cache[temp_id] = {
+            "data": vault_decyphered,
+            "time": time.time(),
+            "client": client
+        }
 
-            sent_code = await client.send_code_request(vault_decyphered['phone'])
-            login_cache[temp_id] = {
-                "data": vault_decyphered,
-                "time": time.time(),
-                "client": client,
-                "sent_code": sent_code
-            }
-            return {"status":"session expired"}
-        except Exception as e:
-            await client.disconnect()
-            raise HTTPException(status_code=500, detail=f"Errore invio SMS: {str(e)}")
+        response.set_cookie(
+            key="login_session",
+            value=temp_id_encrypted,
+            httponly=True,
+            secure=True,
+            samesite="strict",
+        )
 
-    return {"status":"logged in"}
+        await client.connect()
+
+        if not await client.is_user_authorized():
+            try:
+                await client.disconnect()
+                client = TelegramClient(StringSession(), vault_decyphered['api_id'], vault_decyphered['api_hash'])
+                await client.connect()
+
+                sent_code = await client.send_code_request(vault_decyphered['phone'])
+                login_cache[temp_id] = {
+                    "data": vault_decyphered,
+                    "time": time.time(),
+                    "client": client,
+                    "sent_code": sent_code
+                }
+                _reset_login_rate_limit(client_ip)
+                return {"status":"session expired"}
+            except Exception as e:
+                await client.disconnect()
+                raise HTTPException(status_code=500, detail=f"Errore invio SMS: {str(e)}")
+
+        _reset_login_rate_limit(client_ip)
+        return {"status":"logged in"}
+    except HTTPException as e:
+        if e.status_code in (400, 401):
+            _register_login_failure(client_ip)
+            raise HTTPException(status_code=401, detail="Credenziali non valide")
+        raise
 
 @router.post("/login/expired")
 async def login_user_expired(credentials: code, login_session: str = Cookie(None)):

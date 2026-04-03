@@ -62,7 +62,6 @@
                 sender_id: 'me',
                 sender_username: null,
                 out: true,
-                reply_to: null,
                 file: hasFile,
                 filename: hasFile ? file.name : null,
                 mime: hasFile ? (file.type || 'application/octet-stream') : null,
@@ -898,9 +897,11 @@
               }
 
               const tryDownload = async (url) => {
+                const requestStart = performance.now()
                 const res = await fetch(url, { credentials: 'include' })
                 if (!res.ok) return { ok: false, status: res.status }
                 const blob = await res.blob()
+                const requestEnd = performance.now()
                 const headerName = parseFilename(res.headers.get('content-disposition'))
                 const filename = headerName || message.filename || 'file'
                 this.downloadingFileName = filename
@@ -913,15 +914,19 @@
                 link.click()
                 link.remove()
                 window.URL.revokeObjectURL(blobUrl)
-                return { ok: true }
+                return { ok: true, elapsedMs: requestEnd - requestStart }
               }
 
               try {
                 const encryptedUrl = `${__API_URL__}/media/cifrato/download/${this.selectedChat.id}/${message.id}`
                 const plainUrl = `${__API_URL__}/media/download/${this.selectedChat.id}/${message.id}`
 
-                  const mustUseEncrypted = Boolean(message?.secure) || this.isEncryptedPayload(message)
-                  let result = await tryDownload(mustUseEncrypted ? encryptedUrl : plainUrl)
+                const mustUseEncrypted = Boolean(message?.secure) || this.isEncryptedPayload(message)
+                let result = await tryDownload(mustUseEncrypted ? encryptedUrl : plainUrl)
+                if (result.ok) {
+                  const type = mustUseEncrypted ? 'cifrato' : 'non cifrato'
+                  console.log(`[DOWNLOAD][FRONTEND] ${type} msg=${message.id} tempo=${result.elapsedMs.toFixed(2)}ms`)
+                }
                 if (!result.ok) {
                   this.errormsg = `Download fallito (${result.status})`
                 }
