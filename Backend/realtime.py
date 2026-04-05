@@ -2,25 +2,19 @@ import asyncio, hashlib, sqlite3, json
 from fastapi import WebSocket
 from telethon import events, utils
 from telethon.tl.types import PeerChannel, UpdateDeleteChannelMessages, UpdateDeleteMessages
-from config import pepper
+from config import pepper, MAX_INDEX_PER_CHAT
 from database.sqlite import get_connection, db_lock
-from cryptography_ import  decrypt_vault, decrypt_vault, verify_message_sign, calculate_message_sign, encrypt_vault
-from utils import  login_cache, set_media, is_logged_in
+from databaseInteractions import get_group_vault
+from cryptography_ import decrypt_vault, verify_message_sign, calculate_message_sign, encrypt_vault
+from utils import  login_cache, set_media, is_logged_in, is_group
 from messages_handler import handle_in, handle_message, handle_file, handle_on
 
 _active_connections = {}
 _connections_lock = asyncio.Lock()
 _message_index = {}
 _message_index_lock = asyncio.Lock()
-_MAX_INDEX_PER_CHAT = 3000
 
-def _is_group_chat_id(chat_id: int) -> bool:
-    try:
-        return int(chat_id) < 0
-    except Exception:
-        return False
-
-def _get_remote_signing_keys(user_data, chat_id: int, sender_id: int | None) -> dict:
+def _get_remote_signing_keys(user_data, chat_id: int, sender_id: int):
     if not user_data:
         return {}
 
@@ -28,23 +22,16 @@ def _get_remote_signing_keys(user_data, chat_id: int, sender_id: int | None) -> 
     chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
 
     try:
-        with db_lock, get_connection() as conn:
-            cursor = conn.cursor()
-            if _is_group_chat_id(chat_id):
-                cursor.execute(
-                    """SELECT vault FROM contatti_gruppo WHERE proprietario = ? AND gruppo_id = ?""",
-                    (username, chat_id_cif)
-                )
-                risultato = cursor.fetchone()
-                if not risultato or not risultato[0]:
-                    return {}
-                vault_deciphered = decrypt_vault(risultato[0], user_data['data']['masterkey'])
-                partecipanti = vault_deciphered.get('partecipanti', {})
-                participant = partecipanti.get(str(sender_id)) if isinstance(partecipanti, dict) else None
-                if participant is None and isinstance(partecipanti, dict):
-                    participant = partecipanti.get(sender_id)
-                signing_keys = participant.get('chiavi_firma', {}) if isinstance(participant, dict) else {}
-            else:
+        if is_group(chat_id):
+            _, vault_deciphered = get_group_vault(username, chat_id, None, user_data)
+            partecipanti = vault_deciphered.get('partecipanti', {}) if isinstance(vault_deciphered, dict) else {}
+            participant = partecipanti.get(str(sender_id)) if isinstance(partecipanti, dict) else None
+            if participant is None and isinstance(partecipanti, dict):
+                participant = partecipanti.get(sender_id)
+            signing_keys = participant.get('chiavi_firma', {}) if isinstance(participant, dict) else {}
+        else:
+            with db_lock, get_connection() as conn:
+                cursor = conn.cursor()
                 cursor.execute(
                     """SELECT vault FROM contatti WHERE proprietario = ? AND contatto_id = ?""",
                     (username, chat_id_cif)
@@ -59,22 +46,7 @@ def _get_remote_signing_keys(user_data, chat_id: int, sender_id: int | None) -> 
 
     return signing_keys if isinstance(signing_keys, dict) else {}
 
-def _verify_signed_payload(
-    user_data,
-    chat_id: int,
-    chat_id_cif: str,
-    my_id: int | None,
-    sender_id: int | None,
-    payload_id,
-    payload_kid,
-    payload_kid_cif,
-    payload_seq,
-    payload_cif,
-    payload_sign,
-    kids,
-    text = None,
-    file = None,
-) -> tuple[bool, str]:
+def _verify_signed_payload(user_data, chat_id: int, chat_id_cif: str, my_id: int, sender_id: int, payload_id, payload_kid, payload_kid_cif, payload_seq, payload_cif, payload_sign, kids, text = None, file = None):
 
     if my_id and sender_id == my_id:
         local_kid_map = user_data.get('data', {}).get('chats', {}).get(chat_id_cif, {}).get('kid', {})
@@ -102,7 +74,7 @@ def _verify_signed_payload(
     except ValueError:
         return False, "questo messaggio e' stato modificato"
 
-def _validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int | None, seq) -> tuple[bool, str | None]:
+def _validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int, seq):
     if not isinstance(seq, int):
         return False, "questo messaggio e' stato modificato"
 
@@ -114,12 +86,12 @@ def _validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int | N
 
     username = hashlib.sha256(pepper.encode() + user_data['data']['username'].encode()).hexdigest()
     chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
-    is_group = _is_group_chat_id(chat_id)
+    chat_group = is_group(chat_id)
 
     try:
         with db_lock, get_connection() as conn:
             cursor = conn.cursor()
-            if is_group:
+            if chat_group:
                 cursor.execute(
                     """SELECT vault FROM contatti_gruppo WHERE proprietario = ? AND gruppo_id = ?""",
                     (username, chat_id_cif)
@@ -180,23 +152,23 @@ def _validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int | N
 
     return True, None
 
-async def _remove_user_from_vault(temp_id: str, chat_id: int, user_id: int | None):
+async def _remove_user_from_vault(temp_id: str, chat_id: int, user_id: int):
     user_data = login_cache.get(temp_id)
     if not user_data:
         return
 
-    if user_id is not None and not _is_group_chat_id(chat_id):
+    if user_id is not None and not is_group(chat_id):
         if str(user_id) != str(chat_id):
             return
 
     username = hashlib.sha256(pepper.encode() + user_data['data']['username'].encode()).hexdigest()
     chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
-    is_group = _is_group_chat_id(chat_id)
+    chat_group = is_group(chat_id)
 
     try:
         with db_lock, get_connection() as conn:
             cursor = conn.cursor()
-            if is_group:
+            if chat_group:
                 cursor.execute(
                     """SELECT vault FROM contatti_gruppo WHERE proprietario = ? AND gruppo_id = ?""",
                     (username, chat_id_cif)
@@ -239,15 +211,13 @@ async def index_messages(temp_id: str, chat_id: int, mess_ids: list[int]):
                 continue
             ids_set.add(mid)
             order.append(mid)
-        if len(order) > _MAX_INDEX_PER_CHAT:
-            overflow = len(order) - _MAX_INDEX_PER_CHAT
+        if len(order) > MAX_INDEX_PER_CHAT:
+            overflow = len(order) - MAX_INDEX_PER_CHAT
             for _ in range(overflow):
                 old = order.pop(0)
                 ids_set.discard(old)
 
 async def drop_message_ids(temp_id: str, chat_id: int, message_ids: list[int]):
-    if not message_ids:
-        return
     async with _message_index_lock:
         user_map = _message_index.get(temp_id)
         if not user_map:
@@ -262,7 +232,7 @@ async def drop_message_ids(temp_id: str, chat_id: int, message_ids: list[int]):
         if order:
             chat_map["order"] = [mid for mid in order if mid in ids_set]
 
-async def resolve_chat_id_for_deleted(temp_id: str, mess_ids: list[int]) -> int | None:
+async def resolve_chat_id_for_deleted(temp_id: str, mess_ids: list[int]):
     if not mess_ids:
         return None
     async with _message_index_lock:
@@ -381,7 +351,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
 
             if msg['is_json'] == True:
                 
-                cif_flag = parsed.get("CIF") or parsed.get("cif")
+                cif_flag = parsed.get("cif")
                 if cif_flag == "in":
                     await handle_in(my_id, msg, data, entity)
                 

@@ -1,5 +1,5 @@
-from utils import is_valid_age_public_key, is_group_chat_id, build_candidate_privates, are_metadata_equals, take_file_data
-from databaseInteractions import store_public_key_in_vault, get_gruppo_vault, get_chat_vault
+from utils import is_valid_age_public_key, is_group, build_candidate_privates, are_metadata_equals, take_file_data
+from databaseInteractions import store_public_key_in_vault, get_group_vault, get_chat_vault
 from cryptography_ import decrypt_with_age, verify_message_sign
 import json, hashlib
 from config import pepper
@@ -30,13 +30,13 @@ async def handle_in(my_id, msg, data, entity):
         return 
 
     username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
-    is_group = is_group_chat_id(chat_id)
+    group_chat = is_group(chat_id)
     saved_ikey = None
     known_kids =[]
 
     try:
-        if is_group:
-            _, chat_vault = get_gruppo_vault(username, chat_id, entity, data)
+        if group_chat:
+            _, chat_vault = get_group_vault(username, chat_id, entity, data)
             sender_str = str(sender_id)
             participant = chat_vault.get('partecipanti', {}).get(sender_str)
             if not isinstance(participant, dict):
@@ -107,7 +107,7 @@ async def handle_in(my_id, msg, data, entity):
         kid=kid,
         kid_cif=kid_cif,
         pub_sign=pub_sign,
-        is_group=is_group,
+        chat_group=group_chat,
         group_title=getattr(entity, 'title', 'Gruppo'),
         ikey=key_to_save 
     )

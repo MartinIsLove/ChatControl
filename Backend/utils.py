@@ -1,5 +1,5 @@
 from cryptography.fernet import Fernet
-from config import secret_key
+from config import secret_key, SESSION_TIMEOUT
 from fastapi import Cookie, HTTPException
 import time, re, base64, io, json, asyncio
 from telethon.tl.types import DocumentAttributeAnimated
@@ -7,8 +7,6 @@ from pydantic import BaseModel
 
 SECRET_KEY = secret_key.decode()
 cipher = Fernet(SECRET_KEY)
-MESSAGE_LIMIT = 4096
-SESSION_TIMEOUT = 1200
 
 login_cache = {}
 
@@ -82,11 +80,6 @@ async def take_file_data(client, entity, msg, cif_flag: str):
     
     return None, None
 
-def split_message(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
-    if limit <= 0:
-        raise ValueError("limit must be > 0")
-    return [text[i:i + limit] for i in range(0, len(text), limit)]
-
 def is_logged_in( login_session: str = Cookie(None), set_time: bool = False):
     global login_cache
     if not login_session:
@@ -127,7 +120,7 @@ def build_candidate_privates(chat_keys: dict, kids):
 
     return selected_key
 
-def is_group_chat_id(chat_id: int) -> bool:
+def is_group(chat_id: int) -> bool:
     try:
         return int(chat_id) < 0
     except Exception:
@@ -200,17 +193,3 @@ def ensure_chat_seq(data: dict, chat_id_hash: str):
     if not isinstance(chat_entry.get('seq'), int):
         chat_entry['seq'] = 0
     return chat_entry['seq']
-
-async def wait_for_public_key_message(client, chat_id: int, public_key: str, timeout: float = 2.0, interval: float = 0.2) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            messages = await client.get_messages(chat_id, limit=10)
-        except Exception:
-            messages = []
-        for msg in messages or []:
-            text = getattr(msg, "message", None) or getattr(msg, "text", None) or ""
-            if '"cif"' in text and '"in"' in text and public_key in text:
-                return True
-        await asyncio.sleep(interval)
-    return False

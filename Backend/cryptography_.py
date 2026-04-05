@@ -8,13 +8,6 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, PublicFormat, NoEncryption
 from cryptography.fernet import Fernet
 
-def _b64url(data: bytes):
-    return base64.urlsafe_b64encode(data).decode().rstrip("=")
-
-def _b64url_decode(data: str):
-    padding = (-len(data)) % 4
-    return base64.urlsafe_b64decode(data + ("=" * padding))
-        
 def derive_signing_keys_from_age_private(age_private_key: str):
     
     normalized = (age_private_key or "").strip()
@@ -48,15 +41,15 @@ def derive_signing_keys_from_age_private(age_private_key: str):
     kid = kid_full.finalize()[:16]
 
     return {
-        "private_key": _b64url(private_bytes),
-        "public_key": _b64url(public_bytes),
-        "kid": _b64url(kid),
+        "private_key": base64.urlsafe_b64encode(private_bytes).decode().rstrip("="),
+        "public_key": base64.urlsafe_b64encode(public_bytes).decode().rstrip("="),
+        "kid": base64.urlsafe_b64encode(kid).decode().rstrip("="),
     }
 
 def calculate_message_sign(private_key_b64url: str, seq = None, kid = None, kid_cif = None, message_id = None, cif = None, kids = None, text = None, file = None, identity = None):
    
     try:
-        private_key_raw = _b64url_decode(private_key_b64url.strip())
+        private_key_raw = base64.urlsafe_b64decode(private_key_b64url.strip() + ("=" * ((-len(private_key_b64url.strip())) % 4)))
     except Exception as exc:
         raise ValueError("Formato chiave privata di firma non valido") from exc
 
@@ -71,7 +64,7 @@ def calculate_message_sign(private_key_b64url: str, seq = None, kid = None, kid_
         }
     else:
         if file is not None:
-            payload = {"file": _b64url(file)}
+            payload = {"file": base64.urlsafe_b64encode(file).decode().rstrip("=")}
         else:
             sanitized_kids = [str(k).strip() for k in kids] if kids else[]
 
@@ -88,7 +81,7 @@ def calculate_message_sign(private_key_b64url: str, seq = None, kid = None, kid_
 
     signer = Ed25519PrivateKey.from_private_bytes(private_key_raw)
     signature = signer.sign(payload_bytes)
-    return _b64url(signature)
+    return base64.urlsafe_b64encode(signature).decode().rstrip("=")
 
 def verify_message_sign(  
     public_key_b64url: str,
@@ -105,7 +98,7 @@ def verify_message_sign(
 ) -> bool:
    
     try:
-        public_key_raw = _b64url_decode(public_key_b64url.strip())
+        public_key_raw = base64.urlsafe_b64decode(public_key_b64url.strip() + ("=" * ((-len(public_key_b64url.strip())) % 4)))
     except Exception as exc:
         raise ValueError("Formato chiave pubblica di firma non valido") from exc
 
@@ -113,7 +106,7 @@ def verify_message_sign(
         raise ValueError("La chiave pubblica di firma deve essere lunga 32 byte")
 
     try:
-        signature_raw = _b64url_decode(signature_b64url.strip())
+        signature_raw = base64.urlsafe_b64decode(signature_b64url.strip() + ("=" * ((-len(signature_b64url.strip())) % 4)))
     except Exception:
         return False
 
@@ -126,7 +119,7 @@ def verify_message_sign(
         }
 
     elif file:
-        payload = { "file": _b64url(file)}
+        payload = { "file": base64.urlsafe_b64encode(file).decode().rstrip("=")}
     else:
         sanitized_kids = [str(k).strip() for k in kids] if kids else[]
         payload = {
@@ -153,10 +146,7 @@ def derivate_master_key(passphrase: str, salt: bytes):
     master_key_base64 = base64.urlsafe_b64encode(raw_key)
     return master_key_base64
 
-def genera_chiavi_firma():
-    """Genera una coppia di chiavi Ed25519 formattata come le altre funzioni.
-    Restituisce un dict con `private_key`, `public_key` e `kid` in base64url.
-    """
+def key_sign_gen():
     private_key = Ed25519PrivateKey.generate()
     public_key = private_key.public_key()
 
@@ -174,7 +164,7 @@ def genera_chiavi_firma():
     kid_full.update(public_bytes)
     kid = kid_full.finalize()[:16]
 
-    return  _b64url(private_bytes), _b64url(public_bytes),  _b64url(kid)
+    return  base64.urlsafe_b64encode(private_bytes).decode().rstrip("="), base64.urlsafe_b64encode(public_bytes).decode().rstrip("="),  base64.urlsafe_b64encode(kid).decode().rstrip("=")
     
 def encrypt_vault(dic_mess, master_key):
     json_data = json.dumps(dic_mess)
@@ -261,11 +251,11 @@ def get_file_sha256(file_path: str):
 
 def calculate_message_sign_stream(private_key_b64url: str, seq=None, kid=None, kid_cif=None, message_id=None, cif=None, kids=None, text=None, file_hash: bytes = None, identity=None):
     try:
-        private_key_raw = _b64url_decode(private_key_b64url.strip())
+        private_key_raw = base64.urlsafe_b64decode(private_key_b64url.strip() + ("=" * ((-len(private_key_b64url.strip())) % 4)))
         if identity:
             payload = {"seq": seq, "kid": kid.strip(), "kid_cif": kid_cif.strip(), "id": message_id.strip()}
         elif file_hash:
-            payload = {"file_hash": _b64url(file_hash)}
+            payload = {"file_hash": base64.urlsafe_b64encode(file_hash).decode().rstrip("=")}
         else:
             sanitized_kids = [str(k).strip() for k in kids] if kids else []
             payload = {"seq": seq, "kid": kid.strip(), "kid_cif": kid_cif.strip(), "id": message_id.strip(), "cif": cif.strip(), "kids": sanitized_kids, "text": text}
@@ -273,22 +263,22 @@ def calculate_message_sign_stream(private_key_b64url: str, seq=None, kid=None, k
         payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         signer = Ed25519PrivateKey.from_private_bytes(private_key_raw)
         signature = signer.sign(payload_bytes)
-        return _b64url(signature)
+        return base64.urlsafe_b64encode(signature).decode().rstrip("=")
     except Exception:
         return None
 
 def verify_message_sign_stream(public_key_b64url: str, signature_b64url: str, seq=None, kid=None, kid_cif=None, message_id=None, cif=None, kids=None, text=None, file_hash: bytes = None, identity=None) -> bool:
     try:
-        public_key_raw = _b64url_decode(public_key_b64url.strip())
+        public_key_raw = base64.urlsafe_b64decode(public_key_b64url.strip() + ("=" * ((-len(public_key_b64url.strip())) % 4)))
         if len(public_key_raw) != 32:
             raise ValueError("La chiave pubblica di firma deve essere lunga 32 byte")
 
-        signature_raw = _b64url_decode(signature_b64url.strip())
+        signature_raw = base64.urlsafe_b64decode(signature_b64url.strip() + ("=" * ((-len(signature_b64url.strip())) % 4)))
 
         if identity:
             payload = {"seq": seq, "kid": kid.strip(), "kid_cif": kid_cif.strip(), "id": message_id.strip()}
         elif file_hash is not None:
-            payload = {"file_hash": _b64url(file_hash)}
+            payload = {"file_hash": base64.urlsafe_b64encode(file_hash).decode().rstrip("=")}
         else:
             sanitized_kids = [str(k).strip() for k in kids] if kids else []
             payload = {
@@ -310,7 +300,7 @@ def verify_message_sign_stream(public_key_b64url: str, signature_b64url: str, se
     except Exception:
         return False
     
-def genera_chiavi():
+def key_gen_age():
     try:
         risultato = subprocess.run(['age-keygen'], capture_output=True, text=True, check=True)
         output = risultato.stdout

@@ -1,21 +1,15 @@
 from fastapi import APIRouter, Cookie, HTTPException, UploadFile, File, Form, BackgroundTasks
-import time, hashlib, base64, json, tempfile, shutil, os, secrets, mimetypes, io
+import time, hashlib, base64, json, tempfile, shutil, os, secrets, io
 from pydantic import BaseModel
-from config import pepper
-from cryptography_ import encrypt_with_age, genera_chiavi, encrypt_vault, derive_signing_keys_from_age_private, calculate_message_sign, genera_chiavi_firma, get_file_sha256, encrypt_file_with_age, calculate_message_sign_stream
+from config import pepper, MESSAGE_LIMIT, FILE_DIMENSION_LIMIT, PUBLIC_KEY_COOLDOWN, MAX_MESSAGE_LIMIT, UPLOAD_DIR
+from cryptography_ import encrypt_with_age, key_gen_age, encrypt_vault, derive_signing_keys_from_age_private, calculate_message_sign, key_sign_gen, get_file_sha256, encrypt_file_with_age, calculate_message_sign_stream
 from databaseInteractions import get_chat_chyper_keys, get_group_chyper_keys, set_user_vault
-from utils import  is_logged_in, split_message, get_current_local_age_key, ensure_chat_seq, wait_for_public_key_message
+from utils import  is_logged_in, get_current_local_age_key, ensure_chat_seq
 from telethon.tl.types import DocumentAttributeFilename
 import FastTelethonhelper
 from realtime import broadcast_event 
-from config import UPLOAD_DIR
 
 router = APIRouter()
-
-MAX_MESSAGE_LIMIT = 10000
-FILE_DIMENSION_LIMIT = 1073741824
-MESSAGE_LIMIT = 4096
-PUBLIC_KEY_COOLDOWN = 0
 
 class message (BaseModel):
     text: str
@@ -30,16 +24,11 @@ class delete_m(BaseModel):
 class iniz (BaseModel):
     chat_id: int
 
-async def send_public_if_not_exist(chat_id, login_session, client, chat_id_hash, data):
+async def send_public_if_not_exist(chat_id, login_session, chat_id_hash, data):
     chat_data = data.get('data', {}).get('chats', {}).get(chat_id_hash, {})
     current_key = get_current_local_age_key(chat_data)
     if not current_key or not current_key.get('pubblica'):
-            key_response = await send_public_key(iniz(chat_id=chat_id), login_session)
-            public_key = key_response.get("public")
-            if public_key:
-                key_visible = await wait_for_public_key_message(client, chat_id, public_key)
-                if not key_visible:
-                    raise HTTPException(status_code=503, detail="Chiave non visibile in chat, riprova")
+            _ = await send_public_key(iniz(chat_id=chat_id), login_session)
             chat_data = data.get('data', {}).get('chats', {}).get(chat_id_hash, {})
             current_key = get_current_local_age_key(chat_data)
 
@@ -81,7 +70,7 @@ async def process_file_upload_task(
             sent_id = getattr(sent_msg, 'id', None)
         else:
             id_mess = secrets.token_hex(16)
-            await send_public_if_not_exist(chat_id, login_session, client, chat_id_hash, data)
+            await send_public_if_not_exist(chat_id, login_session, chat_id_hash, data)
 
             keys_dict = get_group_chyper_keys(data, chat_id) if group else get_chat_chyper_keys(data, chat_id)
             kids, recipient_keys = zip(*[(k, v) for k, v in keys_dict.items() if v])
@@ -211,8 +200,8 @@ async def s_message( message: message, login_session: str = Cookie(None)):
     if not message.cryph:
         
         try:
-            if len(message.text)>4096:
-                splitted_text = split_message(message.text)
+            if len(message.text)>MESSAGE_LIMIT:
+                splitted_text = [message.text[i:i + MESSAGE_LIMIT] for i in range(0, len(message.text), MESSAGE_LIMIT)]
                 for text in splitted_text:
                     await client.send_message(message.chat_id, text)
                 return {"status": "ok"}
@@ -227,7 +216,7 @@ async def s_message( message: message, login_session: str = Cookie(None)):
         id_messagge = secrets.token_hex(16)
         chat_id_hash = hashlib.sha256(pepper.encode() + str(message.chat_id).encode()).hexdigest()        
 
-        await send_public_if_not_exist(message.chat_id, login_session, client, chat_id_hash, data)
+        await send_public_if_not_exist(message.chat_id, login_session, chat_id_hash, data)
         
         if message.group:
             
@@ -368,7 +357,7 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
     
     
     if not current_key:
-        private_sign, public_sign, kid = genera_chiavi_firma()
+        private_sign, public_sign, kid = key_sign_gen()
         if 'chats' not in data['data']:
             data['data']['chats'] = {}
         if chat_id_hash not in data['data']['chats'] or not isinstance(data['data']['chats'][chat_id_hash], dict):
@@ -380,7 +369,7 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
         if time.time() - inizio_corrente < PUBLIC_KEY_COOLDOWN:
             raise HTTPException(status_code=409, detail="Aspetta più tempo per generare un'altra chiave per questa chat")
 
-    public, privata = genera_chiavi()
+    public, privata = key_gen_age()
 
     derivated = derive_signing_keys_from_age_private(privata)
     second_kid = base64.urlsafe_b64encode(hashlib.sha256(privata.encode("ascii")).digest()[:16]).decode().rstrip("=")

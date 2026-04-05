@@ -1,16 +1,16 @@
 from fastapi import APIRouter, Cookie, WebSocket, WebSocketDisconnect, HTTPException
-import sqlite3, hashlib, json, tempfile, io, os, asyncio, time, subprocess
+import sqlite3, hashlib, json, tempfile, os, asyncio, time, subprocess
 from datetime import datetime
 from database.sqlite import get_connection, db_lock
-from config import pepper
-from databaseInteractions import store_public_key_in_vault, get_gruppo_vault, get_chat_vault, chats_vault_update, set_user_vault
+from config import pepper, DOWNLOAD_FAST
+from databaseInteractions import store_public_key_in_vault, get_group_vault, get_chat_vault, chats_vault_update, set_user_vault
 from cryptography_ import verify_message_sign, decrypt_with_age, calculate_message_sign, encrypt_vault, calculate_message_sign_stream, verify_message_sign_stream
-from utils import is_logged_in, is_valid_age_public_key, is_group_chat_id, build_candidate_privates, set_media
+from utils import is_logged_in, is_valid_age_public_key, is_group, build_candidate_privates, set_media
 from realtime import connect_socket, disconnect_socket, register_telethon_handlers, index_messages
 from telethon.tl.types import MessageService, MessageActionChatCreate, MessageActionChatDeleteUser, MessageActionChatAddUser, MessageActionPinMessage
 from fastapi.responses import StreamingResponse
 from messages_handler import handle_in, handle_file, handle_on, handle_message
-import FastTelethonhelper
+from FastTelethonhelper import fast_download
 
 router = APIRouter()
 
@@ -31,7 +31,7 @@ def verify_signed_payload(sender_id, payload_id, payload_kid, payload_kid_cif, p
             return (payload_sign == expected_sign), "questo messaggio e' stato modificato"
 
         user_str = str(sender_id)
-        if is_group_chat_id(chat_id):
+        if is_group(chat_id):
             participant_data = chat_vault.get('partecipanti', {}).get(user_str)
             if participant_data is None and isinstance(chat_vault, dict):
                 participant_data = chat_vault.get(sender_id)
@@ -76,7 +76,7 @@ def verify_file_hash_signature(sender_id, payload_kid, payload_sign, chat_id, da
             return (payload_sign == expected_sign), "firma file non valida"
 
         user_str = str(sender_id)
-        if is_group_chat_id(chat_id):
+        if is_group(chat_id):
             participant_data = chat_vault.get('partecipanti', {}).get(user_str)
             if participant_data is None and isinstance(chat_vault, dict):
                 participant_data = chat_vault.get(sender_id)
@@ -90,6 +90,86 @@ def verify_file_hash_signature(sender_id, payload_kid, payload_sign, chat_id, da
         pub_sign = signing_keys.get(payload_kid)
         is_valid = verify_message_sign_stream(pub_sign, payload_sign, file_hash=file_hash)
         return is_valid, "firma file non valida"
+
+async def feed_encrypted_to_age_process(proc, encrypted_tmp_path, encrypted_data_offset):
+    try:
+        with open(encrypted_tmp_path, 'rb') as encrypted_in:
+            encrypted_in.seek(encrypted_data_offset)
+            while True:
+                chunk = encrypted_in.read(65536)
+                if not chunk:
+                    break
+                proc.stdin.write(chunk)
+                await proc.stdin.drain()
+        proc.stdin.close()
+    except Exception:
+        proc.stdin.close()
+
+async def stream_verified_decrypted_file(encrypted_tmp_path, encrypted_data_offset, private_age_key, sender_id, payload_kid, file_sign, chat_id, data, my_id, chat_vault,
+):
+    decrypted_tmp_path = None
+    key_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp_out:
+            decrypted_tmp_path = tmp_out.name
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as key_file:
+            key_file.write(private_age_key)
+            key_path = key_file.name
+
+        file_hash = hashlib.sha256()
+        proc = await asyncio.create_subprocess_exec(
+            'age', '-d', '-i', key_path,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+
+        input_task = asyncio.create_task(
+            feed_encrypted_to_age_process(proc, encrypted_tmp_path, encrypted_data_offset)
+        )
+
+        with open(decrypted_tmp_path, 'wb') as out_f:
+            while True:
+                chunk = await proc.stdout.read(65536)
+                if not chunk:
+                    break
+                file_hash.update(chunk)
+                out_f.write(chunk)
+
+        await input_task
+        await proc.wait()
+
+        if proc.returncode != 0:
+            err = await proc.stderr.read()
+            raise RuntimeError(f"Decifratura file fallita: {err.decode().strip()}")
+
+        file_sign_ok, file_sign_error = verify_file_hash_signature(
+            sender_id,
+            payload_kid,
+            file_sign,
+            chat_id,
+            data,
+            my_id,
+            chat_vault,
+            file_hash.digest(),
+        )
+        if not file_sign_ok:
+            raise RuntimeError(file_sign_error)
+
+        with open(decrypted_tmp_path, 'rb') as in_f:
+            while True:
+                chunk = in_f.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+    finally:
+        if key_path and os.path.exists(key_path):
+            os.remove(key_path)
+        if decrypted_tmp_path and os.path.exists(decrypted_tmp_path):
+            os.remove(decrypted_tmp_path)
+        if encrypted_tmp_path and os.path.exists(encrypted_tmp_path):
+            os.remove(encrypted_tmp_path)
 
 @router.websocket("/ws/chats/{chat_id}")
 async def chat_events(websocket: WebSocket, chat_id: int):
@@ -165,6 +245,9 @@ async def get_chats(login_session: str = Cookie(None)):
 
             chats_data = data.get('data', {}).get('chats', {})
             
+            '''Controlla la presenza di chat già inizializzate per poter 
+               denominare come cyphered la chat, poiché sarebbe già inizializzata.'''
+            
             for chat in chats:
                 chat_id_hash = hashlib.sha256(pepper.encode() + str(chat['id']).encode()).hexdigest()
                 has_remote_key = chat_id_hash in encrypted_ids
@@ -199,14 +282,16 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
 
     username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
     try:
-        if is_group_chat_id(chat_id):
-            _, chat_vault = get_gruppo_vault(username, chat_id, entity, data)
+        if is_group(chat_id):
+            _, chat_vault = get_group_vault(username, chat_id, entity, data)
         else:
             _, chat_vault = await get_chat_vault(username, chat_id, client, data)
     except sqlite3.Error as error:
         raise HTTPException(status_code=500, detail=str(error))
 
-    if is_group_chat_id(chat_id):
+    '''il blocco di codice che segue inizializza il partecipante/i nel caso in cui non 
+       fossero già presenti nel vault'''
+    if is_group(chat_id):
         vault = chat_vault.setdefault('partecipanti', {})
         for participant_id, participant_data in list(vault.items()):
             if not isinstance(participant_data, dict):
@@ -219,10 +304,13 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
         if 'seq' not in vault or not isinstance(vault.get('seq'), int):
             vault['seq'] = None
 
+
     me = await client.get_me()
     my_id = me.id if me else None
     seq_dirty = False
     
+    '''funzione che nel caso in cui il numero di sequenza del messaggio precedente (nella history)
+       dovesse essere maggiore o uguale di quello successivo'''
     def mark_replay_in_history(messages_list):
         stream_last_seq = {}
 
@@ -240,17 +328,14 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
             else:
                 stream_last_seq[sender_key] = seq_value
 
+    '''funzione che controlla a ritroso nella history dei messaggi (solo 100 hit) se ci sono messaggi con numero di
+       sequenza uguale a quello dei primi messaggi nella finestra per ogni utente'''
     async def has_duplicate_seq_in_history(sender_id, seq_value, current_msg_id):
-        if sender_id is None or not isinstance(seq_value, int):
+        if sender_id is None:
             return False
 
         async for history_msg in client.iter_messages(entity, from_user=sender_id, limit=100, max_id=current_msg_id-1):
-            if history_msg.id == current_msg_id:
-                continue
-
             raw_text = history_msg.message or ''
-            if not raw_text:
-                continue
 
             try:
                 parsed_history = json.loads(raw_text)
@@ -260,7 +345,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
             if not isinstance(parsed_history, dict):
                 continue
 
-            cif_flag = parsed_history.get('CIF') or parsed_history.get('cif')
+            cif_flag = parsed_history.get('cif')
             if cif_flag not in ("on", "file", "message"):
                 continue
 
@@ -270,7 +355,8 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
 
         return False
 
-    async def mark_replay_on_chunk_boundary(messages_list):
+    '''questa funzione prende i primi messaggi per ogni utente e li passa alla funzione superiore'''
+    async def mark_replay_on_chunk(messages_list):
         oldest_by_sender = {}
 
         for item in reversed(messages_list):
@@ -279,10 +365,14 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
             message_id = item.get('id')
             sender_id = item.get('sender_id')
 
-            if sender_key is None or not isinstance(seq_value, int) or message_id is None:
+            if sender_key is None or not isinstance(seq_value, int):
                 continue
+
+            #se questo sender specifico già è nel dizionario allora questo messaggio è più nuovo e non ci serve
             if sender_key in oldest_by_sender:
                 continue
+
+            #se il messaggio è già stato etichettato come errore allora non ci serve
             if item.get('error'):
                 continue
 
@@ -292,9 +382,6 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                 'message_id': message_id,
                 'message_ref': item,
             }
-
-        if not oldest_by_sender:
-            return
 
         candidates = list(oldest_by_sender.values())
 
@@ -308,16 +395,17 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
             except Exception:
                 continue
 
-            if result is True:
+            if result:
                 message_ref = candidate['message_ref']
                 message_ref['error'] = "questo messaggio e' un reply attack"
                 message_ref.pop('secure', None)
                 message_ref.pop('chiave', None)
 
-    def update_max_seq_in_vault(sender_id, seq_value):
+    '''questa funzione prende il numero di sequenza maggiore del presente e lo salva nel vault'''
+    def update_max_seq(sender_id, seq_value):
         nonlocal seq_dirty
         
-        if is_group_chat_id(chat_id):
+        if is_group(chat_id):
             sender_key = str(sender_id)
             participant_data = vault.get(sender_key)
             if participant_data is None:
@@ -342,6 +430,8 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
     async for msg in client.iter_messages(entity, limit = limit, add_offset = add_offset):
         sender = await msg.get_sender()
         system_message = None
+
+        #si analizzano i messaggi di servizio, come creazione chat, un utente abbandona, ...
         if isinstance(msg, MessageService):
             action = msg.action
             if isinstance(action, MessageActionChatCreate):
@@ -349,6 +439,8 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
             elif isinstance(action, MessageActionChatDeleteUser):
                 left_user = getattr(action, 'user_id', None)
                 left_user_name = None
+
+                #si cerca di risolvere l'username dell'utente che ha lasciato il gruppo
                 if left_user:
                     try:
                         left_user_entity = await client.get_entity(left_user)
@@ -359,6 +451,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                     system_message = f"{left_user_name} ha lasciato il gruppo"
                 else:
                     system_message = "Un utente ha lasciato il gruppo"
+
             elif isinstance(action, MessageActionChatAddUser):
                 added_users = getattr(action, 'users', None)
                 if added_users and isinstance(added_users, list):
@@ -375,7 +468,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                 else:
                     system_message = "Un utente è entrato nel gruppo"
             elif isinstance(action, MessageActionPinMessage):
-                system_message = f"Un messaggio è stato pinnato nella chat(id: {msg.id})"
+                system_message = f"Un messaggio è stato pinnato nella chat"
 
             else:
                 system_message = "Notifica di sistema"
@@ -402,7 +495,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
         return verify_signed_payload(sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, chat_id, data, my_id, chat_vault, kids, text)
 
     def history_update_seq(sender_id, seq):
-        update_max_seq_in_vault(sender_id, seq)
+        update_max_seq(sender_id, seq)
         return True, None
     
     for msg in messages:
@@ -421,7 +514,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
             msg['is_json'] = False
         
         if msg['is_json'] == True:
-            cif_flag = msg['json'].get('CIF') or msg['json'].get('cif')
+            cif_flag = msg['json'].get('cif')
 
             if cif_flag == "in":            
                 await handle_in(my_id, msg, data, entity)
@@ -438,16 +531,18 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
                 await handle_message(client, entity, msg, data, chat_id_cif, history_verify_sig, history_update_seq)
                 continue
 
-    await mark_replay_on_chunk_boundary(messages)
+    await mark_replay_on_chunk(messages)
     mark_replay_in_history(messages)
     for msg in messages:
         msg.pop('_secure_seq', None)
         msg.pop('_secure_sender_key', None)
 
+
+    #questo blocco aggiorna i numeri di sequenza nel vault degli utenti, solo se è stato modificato
     if seq_dirty:
         try:
-            if is_group_chat_id(chat_id):
-                latest_insert_new_vault, latest_chat_vault = get_gruppo_vault(username, chat_id, entity, data)
+            if is_group(chat_id):
+                latest_insert_new_vault, latest_chat_vault = get_group_vault(username, chat_id, entity, data)
                 
                 latest_participants = latest_chat_vault.setdefault('partecipanti', {})
                 if not isinstance(latest_participants, dict):
@@ -507,14 +602,15 @@ async def get_init_messages(chat_id: int, login_session: str = Cookie(None)):
     me = await client.get_me()
     my_id = me.id if me else None
 
-    is_group = is_group_chat_id(chat_id)
-    found = 0
-    keys_added = 0
+    chat_group = is_group(chat_id)
     chat_id_hash = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
+
+    #prende time dal dizionario in ram, il quale rappresenta l'ultima ricerca per le chiavi nella chat
     last_modify = data.get('data', {}).get('chats', {}).get(chat_id_hash, {}).get('time', None)
     last_dt = datetime.fromtimestamp(last_modify) if last_modify else None
 
     async for msg in client.iter_messages(entity, search='"cif": "in"', limit=None, offset_date = last_dt, reverse= True):
+        
         if last_dt and (not msg.date or msg.date.timestamp() <= last_modify):
             continue
         if my_id and msg.sender_id == my_id:
@@ -525,7 +621,7 @@ async def get_init_messages(chat_id: int, login_session: str = Cookie(None)):
         except Exception:
             continue
 
-        cif_flag = parsed.get('CIF') or parsed.get('cif')
+        cif_flag = parsed.get('cif')
         public = parsed.get('public')
         kid = parsed.get('kid')
         kid_cif = parsed.get('kid_cif')
@@ -534,8 +630,7 @@ async def get_init_messages(chat_id: int, login_session: str = Cookie(None)):
         if cif_flag != "in" or not public or not is_valid_age_public_key(public):
             continue
 
-        found += 1
-        changed = store_public_key_in_vault(
+        store_public_key_in_vault(
             data,
             chat_id,
             msg.sender_id,
@@ -543,11 +638,9 @@ async def get_init_messages(chat_id: int, login_session: str = Cookie(None)):
             kid=kid,
             kid_cif=kid_cif,
             pub_sign=pub_sign,
-            is_group=is_group,
+            chat_group=chat_group,
             group_title=getattr(entity, 'title', 'Gruppo')
         )
-        if changed:
-            keys_added += 1
         data['data']['chats'][chat_id_hash]['time'] = time.time()
 
     username = hashlib.sha256(pepper.encode() + data['data']['username'].encode()).hexdigest()
@@ -561,11 +654,7 @@ async def get_init_messages(chat_id: int, login_session: str = Cookie(None)):
         vault_ciphered = encrypt_vault(data['data'], data['data']['masterkey'])
     set_user_vault(username, vault_ciphered)
 
-    return {
-        "chat_id": chat_id,
-        "init_messages_found": found,
-        "keys_added": keys_added,
-    }
+    return {"status":"ok"}
 
 @router.get("/media/download/{chat_id}/{message_id}")
 async def download_media(chat_id: int, message_id: int, login_session: str = Cookie(None)):
@@ -602,8 +691,7 @@ async def download_media(chat_id: int, message_id: int, login_session: str = Coo
         
         async def stream_media_chunks():
             async for chunk in client.iter_download(message.media, request_size=64 * 1024):
-                if chunk:
-                    yield chunk
+                yield chunk
         
         mime_type = 'application/octet-stream'
         
@@ -657,19 +745,13 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
         with tempfile.NamedTemporaryFile(delete=False, suffix=".dat") as tmp_enc:
             encrypted_tmp_path = tmp_enc.name
 
-        threshold_bytes = 30 * 1024
         document_size = getattr(message.document, 'size', 0) or 0
-        fast_download = getattr(FastTelethonhelper, 'fast_download', None)
-        if document_size < threshold_bytes:
-            if callable(fast_download):
-                try:
-                    await fast_download(client, message.document, encrypted_tmp_path)
-                except TypeError:
-                    await fast_download(client, message.document, file=encrypted_tmp_path)
-                except Exception:
-                    await client.download_media(message, file=encrypted_tmp_path)
-            else:
-                await client.download_media(message, file=encrypted_tmp_path)
+        if document_size < DOWNLOAD_FAST:
+            download_folder = os.path.dirname(encrypted_tmp_path) + os.sep
+            downloaded_path = await fast_download(client, message, download_folder=download_folder)
+            if downloaded_path != encrypted_tmp_path:
+                os.replace(downloaded_path, encrypted_tmp_path)
+            
         else:
             await client.download_media(message, file=encrypted_tmp_path)
 
@@ -726,8 +808,8 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
         if not file_sign:
             raise HTTPException(status_code=400, detail="Metadati file incompleti: firma finale assente")
         
-        if is_group_chat_id(chat_id):
-            _, chat_vault = get_gruppo_vault(username, chat_id, entity, data)
+        if is_group(chat_id):
+            _, chat_vault = get_group_vault(username, chat_id, entity, data)
         else:
             _, chat_vault = await get_chat_vault(username, chat_id, client, data)
 
@@ -744,85 +826,19 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
         mime_type = inner_metadata.get('mime') or 'application/octet-stream'
         encrypted_data_offset = 4 + meta_size
 
-        async def stream_decrypted_file():
-            decrypted_tmp_path = None
-            key_path = None
-            try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp_out:
-                    decrypted_tmp_path = tmp_out.name
-
-                with tempfile.NamedTemporaryFile(mode='w', delete=False) as key_file:
-                    key_file.write(private_age_key)
-                    key_path = key_file.name
-
-                file_hash = hashlib.sha256()
-                proc = await asyncio.create_subprocess_exec(
-                    'age', '-d', '-i', key_path,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-
-                async def feed_input():
-                    try:
-                        with open(encrypted_tmp_path, 'rb') as encrypted_in:
-                            encrypted_in.seek(encrypted_data_offset)
-                            while True:
-                                chunk = encrypted_in.read(65536)
-                                if not chunk:
-                                    break
-                                proc.stdin.write(chunk)
-                                await proc.stdin.drain()
-                        proc.stdin.close()
-                    except Exception:
-                        proc.stdin.close()
-
-                input_task = asyncio.create_task(feed_input())
-
-                with open(decrypted_tmp_path, 'wb') as out_f:
-                    while True:
-                        chunk = await proc.stdout.read(65536)
-                        if not chunk:
-                            break
-                        file_hash.update(chunk)
-                        out_f.write(chunk)
-
-                await input_task
-                await proc.wait()
-
-                if proc.returncode != 0:
-                    err = await proc.stderr.read()
-                    raise RuntimeError(f"Decifratura file fallita: {err.decode().strip()}")
-
-                file_sign_ok, file_sign_error = verify_file_hash_signature(
-                    message.sender_id,
-                    metadata_plain['kid'],
-                    file_sign,
-                    chat_id,
-                    data,
-                    my_id,
-                    chat_vault,
-                    file_hash.digest(),
-                )
-                if not file_sign_ok:
-                    raise RuntimeError(file_sign_error)
-
-                with open(decrypted_tmp_path, 'rb') as in_f:
-                    while True:
-                        chunk = in_f.read(65536)
-                        if not chunk:
-                            break
-                        yield chunk
-            finally:
-                if key_path and os.path.exists(key_path):
-                    os.remove(key_path)
-                if decrypted_tmp_path and os.path.exists(decrypted_tmp_path):
-                    os.remove(decrypted_tmp_path)
-                if encrypted_tmp_path and os.path.exists(encrypted_tmp_path):
-                    os.remove(encrypted_tmp_path)
-
         return StreamingResponse(
-            stream_decrypted_file(),
+            stream_verified_decrypted_file(
+                encrypted_tmp_path,
+                encrypted_data_offset,
+                private_age_key,
+                message.sender_id,
+                metadata_plain['kid'],
+                file_sign,
+                chat_id,
+                data,
+                my_id,
+                chat_vault,
+            ),
             media_type=mime_type,
             headers={
                 'Content-Disposition': f'attachment; filename="{out_filename}"',

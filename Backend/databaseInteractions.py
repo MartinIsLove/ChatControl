@@ -1,7 +1,7 @@
 from database.sqlite import get_connection, db_lock
 from fastapi import HTTPException
 import sqlite3, hashlib
-from utils import is_group_chat_id
+from utils import is_group
 from cryptography_ import derivate_master_key, decrypt_vault, encrypt_vault
 from config import pepper
 
@@ -72,7 +72,7 @@ def check_username_unicity(username: str):
     except sqlite3.Error as error:
         raise HTTPException(status_code=500, detail=str(error))
 
-def get_gruppo_vault(username: str, chat_id: str, entity, data):
+def get_group_vault(username: str, chat_id: str, entity, data):
     chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
 
     with db_lock, get_connection() as conn:
@@ -126,7 +126,7 @@ def store_public_key_in_vault(
     kid: str | None = None,
     kid_cif: str | None = None,
     pub_sign: str | None = None,
-    is_group: bool | None = None,
+    chat_group: bool | None = None,
     group_title: str | None = None,
     sender_username: str | None = None,
     ikey: str | None = None
@@ -142,7 +142,7 @@ def store_public_key_in_vault(
     try:
         with db_lock, get_connection() as conn:
             cursor = conn.cursor()
-            if is_group:
+            if chat_group:
                 cursor.execute(
                     """SELECT vault FROM contatti_gruppo WHERE proprietario = ? AND gruppo_id = ?""",
                     (username, chat_id_cif)
@@ -176,7 +176,7 @@ def store_public_key_in_vault(
     except sqlite3.Error:
         return False
 
-    if is_group:
+    if chat_group:
         participants = vault_deciphered.setdefault('partecipanti', {})
         
 
@@ -247,7 +247,7 @@ def chats_vault_update(vault, user_data, username, chat_id, insert_new_vault):
     try:
         with db_lock, get_connection() as conn:
             cursor = conn.cursor()
-            if is_group_chat_id(chat_id):
+            if is_group(chat_id):
                 if insert_new_vault:
                     cursor.execute(
                         """INSERT INTO contatti_gruppo (proprietario, gruppo_id, vault) VALUES (?, ?, ?)""",

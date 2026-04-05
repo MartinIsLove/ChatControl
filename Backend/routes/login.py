@@ -8,7 +8,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 from databaseInteractions import get_user_informations, set_user_vault
-from login_control import _register_login_failure, _enforce_login_rate_limit, _reset_login_rate_limit
+from login_control import login_attemps, check_login_block, reset_login_attemps
 router = APIRouter()
 
 
@@ -24,7 +24,7 @@ class code(BaseModel):
 async def login_user(credentials: login_user, response: Response, request: Request):
 
     client_ip = request.client.host if request.client else "unknown"
-    _enforce_login_rate_limit(client_ip)
+    check_login_block(client_ip)
 
     try:
         username = hashlib.sha256(pepper.encode() + credentials.username.encode()).hexdigest()
@@ -68,17 +68,17 @@ async def login_user(credentials: login_user, response: Response, request: Reque
                     "client": client,
                     "sent_code": sent_code
                 }
-                _reset_login_rate_limit(client_ip)
+                reset_login_attemps(client_ip)
                 return {"status":"session expired"}
             except Exception as e:
                 await client.disconnect()
                 raise HTTPException(status_code=500, detail=f"Errore invio SMS: {str(e)}")
 
-        _reset_login_rate_limit(client_ip)
+        reset_login_attemps(client_ip)
         return {"status":"logged in"}
     except HTTPException as e:
         if e.status_code in (400, 401):
-            _register_login_failure(client_ip)
+            login_attemps(client_ip)
             raise HTTPException(status_code=401, detail="Credenziali non valide")
         raise
 
