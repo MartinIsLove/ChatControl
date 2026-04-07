@@ -2,7 +2,7 @@ from database.sqlite import get_connection, db_lock
 from fastapi import HTTPException
 import sqlite3, hashlib
 from utils import is_group
-from cryptography_ import derivate_master_key, decrypt_vault, encrypt_vault
+from cryptography_ import derive_master_key, decrypt_vault, encrypt_vault
 from config import pepper
 
 def get_user_informations(username: str, password: str):
@@ -24,7 +24,7 @@ def get_user_informations(username: str, password: str):
     
     salt_bytes = salt_db
 
-    master_key = derivate_master_key(password, salt_bytes)
+    master_key = derive_master_key(password, salt_bytes)
 
     try:
         vault_decyphered = decrypt_vault(results[1], master_key)

@@ -6,7 +6,7 @@ from telethon.errors import SessionPasswordNeededError
 import secrets, hashlib, time
 from cryptography.fernet import Fernet
 from config import pepper, secret_key
-from cryptography_ import derivate_master_key, encrypt_vault
+from cryptography_ import derive_master_key, encrypt_vault
 from utils import  login_cache
 from databaseInteractions import check_username_unicity, add_user
 
@@ -48,7 +48,7 @@ async def create_user(credentials: UserData, response: Response):
         "phone":credentials.phone,
         "phone_code_hash": sent_code.phone_code_hash,
         "salt": salt,
-        "masterkey_derived":derivate_master_key(credentials.password, salt),
+        "masterkey_derived":derive_master_key(credentials.password, salt),
         "api_id":credentials.api_id,
         "api_hash":credentials.api_hash,
         "username":username,

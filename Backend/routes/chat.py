@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Cookie, WebSocket, WebSocketDisconnect, HTTPException
-import sqlite3, hashlib, json, tempfile, os, asyncio, time, subprocess
+import sqlite3, hashlib, json, tempfile, os, time
 from datetime import datetime
 from database.sqlite import get_connection, db_lock
 from config import pepper, DOWNLOAD_FAST
 from databaseInteractions import store_public_key_in_vault, get_group_vault, get_chat_vault, chats_vault_update, set_user_vault
-from cryptography_ import verify_message_sign, decrypt_with_age, calculate_message_sign, encrypt_vault, calculate_message_sign_stream, verify_message_sign_stream
+from cryptography_ import verify_message_sign, decrypt_with_age, calculate_message_sign, encrypt_vault, calculate_message_sign_stream, verify_message_sign_stream, decrypt_file_with_age_stream
 from utils import is_logged_in, is_valid_age_public_key, is_group, build_candidate_privates, set_media
 from realtime import connect_socket, disconnect_socket, register_telethon_handlers, index_messages
 from telethon.tl.types import MessageService, MessageActionChatCreate, MessageActionChatDeleteUser, MessageActionChatAddUser, MessageActionPinMessage
@@ -91,58 +91,19 @@ def verify_file_hash_signature(sender_id, payload_kid, payload_sign, chat_id, da
         is_valid = verify_message_sign_stream(pub_sign, payload_sign, file_hash=file_hash)
         return is_valid, "firma file non valida"
 
-async def feed_encrypted_to_age_process(proc, encrypted_tmp_path, encrypted_data_offset):
-    try:
-        with open(encrypted_tmp_path, 'rb') as encrypted_in:
-            encrypted_in.seek(encrypted_data_offset)
-            while True:
-                chunk = encrypted_in.read(65536)
-                if not chunk:
-                    break
-                proc.stdin.write(chunk)
-                await proc.stdin.drain()
-        proc.stdin.close()
-    except Exception:
-        proc.stdin.close()
-
 async def stream_verified_decrypted_file(encrypted_tmp_path, encrypted_data_offset, private_age_key, sender_id, payload_kid, file_sign, chat_id, data, my_id, chat_vault,
 ):
     decrypted_tmp_path = None
-    key_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp_out:
             decrypted_tmp_path = tmp_out.name
 
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as key_file:
-            key_file.write(private_age_key)
-            key_path = key_file.name
-
-        file_hash = hashlib.sha256()
-        proc = await asyncio.create_subprocess_exec(
-            'age', '-d', '-i', key_path,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+        file_hash = await decrypt_file_with_age_stream(
+            encrypted_tmp_path,
+            decrypted_tmp_path,
+            private_age_key,
+            encrypted_data_offset=encrypted_data_offset,
         )
-
-        input_task = asyncio.create_task(
-            feed_encrypted_to_age_process(proc, encrypted_tmp_path, encrypted_data_offset)
-        )
-
-        with open(decrypted_tmp_path, 'wb') as out_f:
-            while True:
-                chunk = await proc.stdout.read(65536)
-                if not chunk:
-                    break
-                file_hash.update(chunk)
-                out_f.write(chunk)
-
-        await input_task
-        await proc.wait()
-
-        if proc.returncode != 0:
-            err = await proc.stderr.read()
-            raise RuntimeError(f"Decifratura file fallita: {err.decode().strip()}")
 
         file_sign_ok, file_sign_error = verify_file_hash_signature(
             sender_id,
@@ -152,7 +113,7 @@ async def stream_verified_decrypted_file(encrypted_tmp_path, encrypted_data_offs
             data,
             my_id,
             chat_vault,
-            file_hash.digest(),
+            file_hash,
         )
         if not file_sign_ok:
             raise RuntimeError(file_sign_error)
@@ -164,8 +125,6 @@ async def stream_verified_decrypted_file(encrypted_tmp_path, encrypted_data_offs
                     break
                 yield chunk
     finally:
-        if key_path and os.path.exists(key_path):
-            os.remove(key_path)
         if decrypted_tmp_path and os.path.exists(decrypted_tmp_path):
             os.remove(decrypted_tmp_path)
         if encrypted_tmp_path and os.path.exists(encrypted_tmp_path):
@@ -746,7 +705,7 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
             encrypted_tmp_path = tmp_enc.name
 
         document_size = getattr(message.document, 'size', 0) or 0
-        if document_size < DOWNLOAD_FAST:
+        if document_size > DOWNLOAD_FAST:
             download_folder = os.path.dirname(encrypted_tmp_path) + os.sep
             downloaded_path = await fast_download(client, message, download_folder=download_folder)
             if downloaded_path != encrypted_tmp_path:
@@ -854,5 +813,4 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
     except Exception as e:
         if encrypted_tmp_path and os.path.exists(encrypted_tmp_path):
             os.remove(encrypted_tmp_path)
-        print(f"Errore nel download: {e}")
         raise HTTPException(status_code=502, detail=f"Errore durante lo streaming del file: {str(e)}")
