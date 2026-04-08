@@ -224,9 +224,6 @@
                 this.queueRealtimeReload()
                 return
               }
-              if (payload.event_type === 'new' && !this.dist) {
-                this.scrollToBottom()
-              }
             },
             applyChatEvent(payload) {
               const type = payload.event_type
@@ -275,7 +272,7 @@
                 clearTimeout(this.realtimeReloadTimer)
                 this.realtimeReloadTimer = null
               }
-              this.reload_chat(true, options)
+              this.reload_chat(options)
             },
             setAnimatedStickerRef(messageId, el) {
               if (el) {
@@ -403,8 +400,7 @@
                   this.loading = false
               }
             },
-            async reload_chat(force = false, options = null){
-              const now = Date.now()
+            async reload_chat(options = null){
                 this.loading = true
               let response
               let chat = this.selectedChat
@@ -453,7 +449,7 @@
               const start = Math.max(0, this.messaggi.length - 1 - idx)
               const limit = start + 1
               try {
-                const updated = await this.reload_chat(true, { start, limit })
+                const updated = await this.reload_chat({ start, limit })
                 if (!updated || updated.length === 0) {
                   this.queueRealtimeReload()
                 }
@@ -551,20 +547,7 @@
               }
               this.text = ''
               try {
-                if(outgoingFile && outgoingText){
-
-                  const formData = new FormData()
-                  formData.append('file',outgoingFile)
-                  formData.append('text', outgoingText || '')
-                  formData.append('chat_id',this.selectedChat.id)
-                  formData.append('cryph',false)
-                  formData.append('group',this.selectedChat.is_group)
-                  formData.append('temp_msg_id', optimisticId) 
-
-                  await api.post('/messages/send/file', formData, { withCredentials: true })
-                  
-                }
-                else if(outgoingFile && !outgoingText){
+                if(outgoingFile){
                   const formData = new FormData()
                   formData.append('file',outgoingFile)
                   formData.append('text', outgoingText || '')
@@ -641,7 +624,6 @@
                       group: this.selectedChat.is_group
                     }, { withCredentials: true })
                     
-                    // MODIFICA: Aggiorna l'ID se presente, altrimenti risolvi normalmente
                     if (resp.data && resp.data.message_id) {
                       this.replaceOptimisticId(optimisticId, resp.data.message_id)
                     } else {
@@ -658,7 +640,7 @@
                 }
               }
               else{
-                if(outgoingFile && outgoingText){
+                if(outgoingFile){
                   this.sendingEncryptedFile = true
 
                   const formData = new FormData()
@@ -667,37 +649,10 @@
                   formData.append('chat_id',this.selectedChat.id)
                   formData.append('cryph',true)
                   formData.append('group',this.selectedChat.is_group)
-                  formData.append('temp_msg_id', optimisticId) // <-- AGGIUNGI QUESTO
+                  formData.append('temp_msg_id', optimisticId)
                   
                   try{
                     await api.post('/messages/send/file', formData, { withCredentials: true })
-                  }
-                  catch(e){
-                    this.errormsg = e.response?.data?.message || e.message
-                    this.failOptimisticMessage(optimisticId, this.errormsg)
-                  }
-                  finally{
-                    this.loading = false
-                    this.sendingMessage = false
-                    this.sendingEncryptedFile = false
-                    this.scrollToBottom()
-                    this.focusMessageInput()
-                  }
-                }
-                else if(outgoingFile && !outgoingText){
-                  this.sendingEncryptedFile = true
-
-                  const formData = new FormData()
-                  formData.append('file',outgoingFile)
-                  formData.append('text', outgoingText || '')
-                  formData.append('chat_id',this.selectedChat.id)
-                  formData.append('cryph',true)
-                  formData.append('group',this.selectedChat.is_group)
-                  formData.append('temp_msg_id', optimisticId) // <-- AGGIUNGI QUESTO
-                  
-                  try{
-                    await api.post('/messages/send/file', formData, { withCredentials: true })
-                    // ELIMINATO: if (resp?.data?.message_id) this.replaceOptimisticId...
                   }
                   catch(e){
                     this.errormsg = e.response?.data?.message || e.message
@@ -961,11 +916,6 @@
             this.chatsInterval = setInterval(() => {
                 this.get_chats()
             }, 20000)
-            /*this.chatReloadInterval = setInterval(() => {
-                if (this.selectedChat) {
-                    this.reload_chat()
-                }
-            }, 5000)*/
         },
         beforeUnmount() {
             if (this.chatsInterval) clearInterval(this.chatsInterval)
