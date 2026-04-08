@@ -3,7 +3,7 @@ from pydantic import BaseModel
 import secrets, time, hashlib
 from config import pepper
 from cryptography_ import encrypt_vault
-from utils import cipher, login_cache, is_logged_in
+from utils import cipher, login_cache, login_cache_lock, is_logged_in
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
@@ -38,12 +38,12 @@ async def login_user(credentials: login_user, response: Response, request: Reque
 
         client = TelegramClient(StringSession(vault_decyphered['session']), vault_decyphered['api_id'], vault_decyphered['api_hash'])
         vault_decyphered['masterkey'] =  masterkey
-        global login_cache
-        login_cache[temp_id] = {
-            "data": vault_decyphered,
-            "time": time.time(),
-            "client": client
-        }
+        with login_cache_lock:
+            login_cache[temp_id] = {
+                "data": vault_decyphered,
+                "time": time.time(),
+                "client": client
+            }
 
         response.set_cookie(
             key="login_session",
@@ -62,12 +62,13 @@ async def login_user(credentials: login_user, response: Response, request: Reque
                 await client.connect()
 
                 sent_code = await client.send_code_request(vault_decyphered['phone'])
-                login_cache[temp_id] = {
-                    "data": vault_decyphered,
-                    "time": time.time(),
-                    "client": client,
-                    "sent_code": sent_code
-                }
+                with login_cache_lock:
+                    login_cache[temp_id] = {
+                        "data": vault_decyphered,
+                        "time": time.time(),
+                        "client": client,
+                        "sent_code": sent_code
+                    }
                 reset_login_attemps(client_ip)
                 return {"status":"session expired"}
             except Exception as e:
@@ -93,9 +94,11 @@ async def login_user_expired(credentials: code, login_session: str = Cookie(None
     except Exception:
         raise HTTPException(status_code=400, detail="Sessione invalida")
     
-    global login_cache
+    with login_cache_lock:
+        temp_data = login_cache.get(temp_id)
+    if temp_data is None:
+        raise HTTPException(status_code=400, detail="Sessione scaduta o non valida")
 
-    temp_data = login_cache.get(temp_id)
     client = temp_data['client']
     try: 
         await client.sign_in(temp_data['data']['phone'], credentials.sms, phone_code_hash = temp_data['sent_code'].phone_code_hash)
@@ -131,7 +134,8 @@ async def logout(response: Response, login_session: str = Cookie(None)):
     if login_session:
         try:
             temp_id = cipher.decrypt(login_session.encode()).decode()
-            temp_data = login_cache.pop(temp_id, None)
+            with login_cache_lock:
+                temp_data = login_cache.pop(temp_id, None)
             client = temp_data.get("client") if temp_data else None
             if client:
                 try:

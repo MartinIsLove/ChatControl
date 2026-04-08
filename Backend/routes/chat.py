@@ -4,7 +4,7 @@ from datetime import datetime
 from database.sqlite import get_connection, db_lock
 from config import pepper, DOWNLOAD_FAST
 from databaseInteractions import store_public_key_in_vault, get_group_vault, get_chat_vault, chats_vault_update, set_user_vault
-from cryptography_ import verify_message_sign, decrypt_with_age, calculate_message_sign, encrypt_vault, calculate_message_sign_stream, verify_message_sign_stream, decrypt_file_with_age_stream
+from cryptography_ import verify_signed_payload, decrypt_with_age, encrypt_vault, decrypt_file_with_age_stream
 from utils import is_logged_in, is_valid_age_public_key, is_group, build_candidate_privates, set_media
 from realtime import connect_socket, disconnect_socket, register_telethon_handlers, index_messages
 from telethon.tl.types import MessageService, MessageActionChatCreate, MessageActionChatDeleteUser, MessageActionChatAddUser, MessageActionPinMessage
@@ -13,83 +13,6 @@ from messages_handler import handle_in, handle_file, handle_on, handle_message
 from FastTelethonhelper import fast_download
 
 router = APIRouter()
-
-def verify_signed_payload(sender_id, payload_id, payload_kid, payload_kid_cif, payload_seq, payload_cif, payload_sign, chat_id, data, my_id, chat_vault, kids, text=None, file=None):
-        chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
-        if my_id and sender_id == my_id:
-            local_kid_map = data.get('data', {}).get('chats', {}).get(chat_id_cif, {}).get('kid', {})
-            sign_private = local_kid_map.get(payload_kid) if isinstance(local_kid_map, dict) else None
-            if not sign_private:
-                return False, "chiave di firma locale non disponibile"
-            try:
-                if file is not None:
-                    expected_sign = calculate_message_sign(sign_private, file=file)
-                else:
-                    expected_sign = calculate_message_sign(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, kids, text)
-            except ValueError:
-                return False, "questo messaggio e' stato modificato"
-            return (payload_sign == expected_sign), "questo messaggio e' stato modificato"
-
-        user_str = str(sender_id)
-        if is_group(chat_id):
-            participant_data = chat_vault.get('partecipanti', {}).get(user_str)
-            if participant_data is None and isinstance(chat_vault, dict):
-                participant_data = chat_vault.get(sender_id)
-            signing_keys = participant_data.get('chiavi_firma', {}) if participant_data else {}
-        else:
-            signing_keys = chat_vault.get('chiavi_firma', {}) 
-
-        if payload_kid not in signing_keys:
-            return False, "chiave di firma mittente non disponibile"
-
-        pub_sign = signing_keys.get(payload_kid)
-        try:
-            if file is not None:
-                is_valid = verify_message_sign(pub_sign, payload_sign, file=file)
-            else:
-                is_valid = verify_message_sign(
-                    pub_sign,
-                    payload_sign,
-                    seq=payload_seq,
-                    kid=payload_kid,
-                    kid_cif=payload_kid_cif,
-                    message_id=payload_id,
-                    cif=payload_cif,
-                    kids=kids,
-                    text=text,
-                )
-
-            return is_valid, "questo messaggio/file e' stato modificato"
-        except ValueError:
-            return False, "questo messaggio/file e' stato modificato"
-
-def verify_file_hash_signature(sender_id, payload_kid, payload_sign, chat_id, data, my_id, chat_vault, file_hash: bytes):
-        chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
-        if my_id and sender_id == my_id:
-            local_kid_map = data.get('data', {}).get('chats', {}).get(chat_id_cif, {}).get('kid', {})
-            sign_private = local_kid_map.get(payload_kid) if isinstance(local_kid_map, dict) else None
-            if not sign_private:
-                return False, "chiave di firma locale non disponibile"
-            expected_sign = calculate_message_sign_stream(sign_private, file_hash=file_hash)
-            if not expected_sign:
-                return False, "firma file non verificabile"
-            return (payload_sign == expected_sign), "firma file non valida"
-
-        user_str = str(sender_id)
-        if is_group(chat_id):
-            participant_data = chat_vault.get('partecipanti', {}).get(user_str)
-            if participant_data is None and isinstance(chat_vault, dict):
-                participant_data = chat_vault.get(sender_id)
-            signing_keys = participant_data.get('chiavi_firma', {}) if participant_data else {}
-        else:
-            signing_keys = chat_vault.get('chiavi_firma', {})
-
-        if payload_kid not in signing_keys:
-            return False, "chiave di firma mittente non disponibile"
-
-        pub_sign = signing_keys.get(payload_kid)
-        is_valid = verify_message_sign_stream(pub_sign, payload_sign, file_hash=file_hash)
-        return is_valid, "firma file non valida"
 
 async def stream_verified_decrypted_file(encrypted_tmp_path, encrypted_data_offset, private_age_key, sender_id, payload_kid, file_sign, chat_id, data, my_id, chat_vault,
 ):
@@ -105,15 +28,20 @@ async def stream_verified_decrypted_file(encrypted_tmp_path, encrypted_data_offs
             encrypted_data_offset=encrypted_data_offset,
         )
 
-        file_sign_ok, file_sign_error = verify_file_hash_signature(
-            sender_id,
-            payload_kid,
-            file_sign,
-            chat_id,
+        file_sign_ok, file_sign_error = verify_signed_payload(
             data,
+            chat_id,
             my_id,
-            chat_vault,
-            file_hash,
+            sender_id,
+            None,
+            payload_kid,
+            None,
+            None,
+            None,
+            file_sign,
+            None,
+            file_hash=file_hash,
+            chat_vault=chat_vault,
         )
         if not file_sign_ok:
             raise RuntimeError(file_sign_error)
@@ -126,6 +54,15 @@ async def stream_verified_decrypted_file(encrypted_tmp_path, encrypted_data_offs
                 yield chunk
     finally:
         if decrypted_tmp_path and os.path.exists(decrypted_tmp_path):
+            try:
+                file_size = os.path.getsize(decrypted_tmp_path)
+                if file_size > 0:
+                    with open(decrypted_tmp_path, 'r+b') as wipe_file:
+                        wipe_file.write(b'\0' * file_size)
+                        wipe_file.flush()
+                        os.fsync(wipe_file.fileno())
+            except Exception:
+                pass
             os.remove(decrypted_tmp_path)
         if encrypted_tmp_path and os.path.exists(encrypted_tmp_path):
             os.remove(encrypted_tmp_path)
@@ -451,7 +388,7 @@ async def get_chat_messages(chat_id: int, limit: int, start: int, login_session:
     await index_messages(temp_id, chat_id, [m.get("id") for m in messages if m.get("id") is not None])
 
     def history_verify_sig(sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, kids, text):
-        return verify_signed_payload(sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, chat_id, data, my_id, chat_vault, kids, text)
+        return verify_signed_payload(data, chat_id, my_id, sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, kids, text=text, chat_vault=chat_vault)
 
     def history_update_seq(sender_id, seq):
         update_max_seq(sender_id, seq)
@@ -773,10 +710,19 @@ async def download_encrypt_media(chat_id: int, message_id: int, login_session: s
             _, chat_vault = await get_chat_vault(username, chat_id, client, data)
 
         firma_ok, _ = verify_signed_payload(
-            message.sender_id, metadata_plain['id'], metadata_plain['kid'], 
-            metadata_plain['kid_cif'], metadata_plain['seq'], "file", 
-            metadata_plain['sign'], chat_id, data, my_id, chat_vault, 
-            metadata_plain['kids'], text=inner_metadata.get('text')
+            data=data,
+            chat_id=chat_id,
+            my_id=my_id,
+            sender_id=message.sender_id,
+            payload_id=metadata_plain['id'],
+            payload_kid=metadata_plain['kid'],
+            payload_kid_cif=metadata_plain['kid_cif'],
+            payload_seq=metadata_plain['seq'],
+            payload_cif="file",
+            payload_sign=metadata_plain['sign'],
+            kids=metadata_plain['kids'],
+            text=inner_metadata.get('text'),
+            chat_vault=chat_vault,
         )
         
         if not firma_ok:

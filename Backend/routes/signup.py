@@ -4,10 +4,11 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 import secrets, hashlib, time
+import threading
 from cryptography.fernet import Fernet
 from config import pepper, secret_key
 from cryptography_ import derive_master_key, encrypt_vault
-from utils import  login_cache
+from utils import login_cache, login_cache_lock
 from databaseInteractions import check_username_unicity, add_user
 
 router = APIRouter()
@@ -29,6 +30,7 @@ class signupped_2fa(BaseModel):
     password: str
 
 signup_cache = {}
+signup_cache_lock = threading.Lock()
 
 @router.post("/signup/step1")
 async def create_user(credentials: UserData, response: Response):
@@ -42,18 +44,18 @@ async def create_user(credentials: UserData, response: Response):
 
     check_username_unicity(username)
 
-    global signup_cache
-    signup_cache[temp_id] = {
-        "client":client,
-        "phone":credentials.phone,
-        "phone_code_hash": sent_code.phone_code_hash,
-        "salt": salt,
-        "masterkey_derived":derive_master_key(credentials.password, salt),
-        "api_id":credentials.api_id,
-        "api_hash":credentials.api_hash,
-        "username":username,
-        "username_not_cyphered": credentials.username
-    }
+    with signup_cache_lock:
+        signup_cache[temp_id] = {
+            "client": client,
+            "phone": credentials.phone,
+            "phone_code_hash": sent_code.phone_code_hash,
+            "salt": salt,
+            "masterkey_derived": derive_master_key(credentials.password, salt),
+            "api_id": credentials.api_id,
+            "api_hash": credentials.api_hash,
+            "username": username,
+            "username_not_cyphered": credentials.username
+        }
     
     temp_id_encrypted = cipher.encrypt(temp_id.encode()).decode()
     response.set_cookie(
@@ -77,7 +79,8 @@ async def sign_up_verify(credentials: signupped, signup_session: str = Cookie(No
     except Exception:
         raise HTTPException(status_code=400, detail="Sessione invalida")
     
-    temp_data = signup_cache.get(temp_id)
+    with signup_cache_lock:
+        temp_data = signup_cache.get(temp_id)
     if temp_data is None:
         raise HTTPException(status_code=400, detail="Sessione scaduta o non valida")
     
@@ -115,11 +118,12 @@ async def sign_up_verify(credentials: signupped, signup_session: str = Cookie(No
     temp_id_encrypted = cipher.encrypt(temp_id.encode()).decode()
     da_cifrare['masterkey'] = temp_data['masterkey_derived'].decode() if isinstance(temp_data['masterkey_derived'], bytes) else temp_data['masterkey_derived']
 
-    login_cache[temp_id] = {
-        "data" : da_cifrare,
-        "time" : time.time(),
-        "client" : client
-    }
+    with login_cache_lock:
+        login_cache[temp_id] = {
+            "data": da_cifrare,
+            "time": time.time(),
+            "client": client
+        }
     
     response.set_cookie(
         key="login_session",
@@ -141,7 +145,8 @@ async def sign_up_verify_password(credentials: signupped_2fa, signup_session: st
     except Exception:
         raise HTTPException(status_code=400, detail="Sessione invalida")
 
-    temp_data = signup_cache.get(temp_id)
+    with signup_cache_lock:
+        temp_data = signup_cache.get(temp_id)
     if temp_data is None:
         raise HTTPException(status_code=400, detail="Sessione scaduta o non valida")
     client = temp_data['client']
@@ -174,11 +179,12 @@ async def sign_up_verify_password(credentials: signupped_2fa, signup_session: st
     temp_id = secrets.token_hex(16)
     temp_id_encrypted = cipher.encrypt(temp_id.encode()).decode()
     to_ciph['masterkey'] = temp_data['masterkey_derived'].decode() if isinstance(temp_data['masterkey_derived'], bytes) else temp_data['masterkey_derived']
-    login_cache[temp_id] = {
-        "data" : to_ciph,
-        "time" : time.time(),
-        "client" : client
-    }
+    with login_cache_lock:
+        login_cache[temp_id] = {
+            "data": to_ciph,
+            "time": time.time(),
+            "client": client
+        }
    
 
     response.set_cookie(

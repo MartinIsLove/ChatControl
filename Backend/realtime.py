@@ -5,8 +5,8 @@ from telethon.tl.types import PeerChannel, UpdateDeleteChannelMessages, UpdateDe
 from config import pepper, MAX_INDEX_PER_CHAT
 from database.sqlite import get_connection, db_lock
 from databaseInteractions import get_group_vault
-from cryptography_ import decrypt_vault, verify_message_sign, calculate_message_sign, encrypt_vault
-from utils import  login_cache, set_media, is_logged_in, is_group
+from cryptography_ import decrypt_vault, verify_signed_payload, encrypt_vault
+from utils import login_cache, login_cache_lock, set_media, is_logged_in, is_group
 from messages_handler import handle_in, handle_message, handle_file, handle_on
 
 _active_connections = {}
@@ -14,7 +14,7 @@ _connections_lock = asyncio.Lock()
 _message_index = {}
 _message_index_lock = asyncio.Lock()
 
-def _get_remote_signing_keys(user_data, chat_id: int, sender_id: int):
+def get_remote_signing_keys(user_data, chat_id: int, sender_id: int):
     if not user_data:
         return {}
 
@@ -25,8 +25,8 @@ def _get_remote_signing_keys(user_data, chat_id: int, sender_id: int):
         if is_group(chat_id):
             _, vault_deciphered = get_group_vault(username, chat_id, None, user_data)
             partecipanti = vault_deciphered.get('partecipanti', {}) if isinstance(vault_deciphered, dict) else {}
-            participant = partecipanti.get(str(sender_id)) if isinstance(partecipanti, dict) else None
-            if participant is None and isinstance(partecipanti, dict):
+            participant = partecipanti.get(str(sender_id))
+            if participant is None:
                 participant = partecipanti.get(sender_id)
             signing_keys = participant.get('chiavi_firma', {}) if isinstance(participant, dict) else {}
         else:
@@ -46,35 +46,7 @@ def _get_remote_signing_keys(user_data, chat_id: int, sender_id: int):
 
     return signing_keys if isinstance(signing_keys, dict) else {}
 
-def _verify_signed_payload(user_data, chat_id: int, chat_id_cif: str, my_id: int, sender_id: int, payload_id, payload_kid, payload_kid_cif, payload_seq, payload_cif, payload_sign, kids, text = None, file = None):
-
-    if my_id and sender_id == my_id:
-        local_kid_map = user_data.get('data', {}).get('chats', {}).get(chat_id_cif, {}).get('kid', {})
-        sign_private = local_kid_map.get(payload_kid) if isinstance(local_kid_map, dict) else None
-        if not sign_private:
-            return False, "chiave di firma locale non disponibile"
-        try:
-            if file is not None:
-                    expected_sign = calculate_message_sign(sign_private, file=file)
-            else:
-                expected_sign = calculate_message_sign(sign_private, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, kids, text)
-        except ValueError:
-            return False, "questo messaggio e' stato modificato"
-        return (payload_sign == expected_sign), "questo messaggio e' stato modificato"
-
-    remote_signing_keys = _get_remote_signing_keys(user_data, chat_id, sender_id)
-    pub_sign = remote_signing_keys.get(payload_kid) if isinstance(remote_signing_keys, dict) else None
-    if not pub_sign:
-        return False, "chiave di firma mittente non disponibile"
-    try:
-        if file is not None:
-            return verify_message_sign(pub_sign, payload_sign, file=file), "questo messaggio e' stato modificato"
-        else:
-            return verify_message_sign(pub_sign, payload_sign, payload_seq, payload_kid, payload_kid_cif, payload_id, payload_cif, kids, text), "questo messaggio e' stato modificato"
-    except ValueError:
-        return False, "questo messaggio e' stato modificato"
-
-def _validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int, seq):
+def validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int, seq):
     if not isinstance(seq, int):
         return False, "questo messaggio e' stato modificato"
 
@@ -152,8 +124,9 @@ def _validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int, se
 
     return True, None
 
-async def _remove_user_from_vault(temp_id: str, chat_id: int, user_id: int):
-    user_data = login_cache.get(temp_id)
+async def remove_user_from_vault(temp_id: str, chat_id: int, user_id: int):
+    with login_cache_lock:
+        user_data = login_cache.get(temp_id)
     if not user_data:
         return
 
@@ -250,7 +223,7 @@ async def resolve_chat_id_for_deleted(temp_id: str, mess_ids: list[int]):
             return candidates[0]
         return None
 
-def _serialize_message(msg):
+def serialize_message(msg):
     mess_data = {
         "id": msg.id,
         "chat_id": msg.chat_id,
@@ -320,16 +293,16 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
         temp_id, data = is_logged_in(login_session, False)
         me = await client.get_me()
         my_id = me.id if me else None
-        msg = _serialize_message(event.message)
+        msg = serialize_message(event.message)
         sender = await event.message.get_sender()
         msg['sender_username'] = getattr(sender, 'username', None) if sender else None
         chat_id_cif = hashlib.sha256(pepper.encode() + str(event.chat_id).encode()).hexdigest()
 
         def realtime_verify_sig(sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, kids, text=None, file=None):
-            return _verify_signed_payload(data, event.chat_id, chat_id_cif, my_id, sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, kids, text=text, file=file)
+            return verify_signed_payload(data, event.chat_id, my_id, sender_id, msg_id_cap, kid, kid_cif, seq, flag, sign, kids, text=text)
 
         def realtime_update_seq(sender_id, seq):
-            return _validate_and_store_realtime_seq(data, event.chat_id, sender_id, seq)
+            return validate_and_store_realtime_seq(data, event.chat_id, sender_id, seq)
         
         if not event.chat_id:
             return
@@ -349,7 +322,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
                 msg['is_json'] = False
                 parsed = None
 
-            if msg['is_json'] == True:
+            if msg['is_json']:
                 
                 cif_flag = parsed.get("cif")
                 if cif_flag == "in":
@@ -377,7 +350,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
             return
         if event.message and event.message.id:
             await index_messages(temp_id, event.chat_id, [event.message.id])
-        message_data=_serialize_message(event.message)
+        message_data=serialize_message(event.message)
         payload = {
             "event_type": "edited",
             "chat_id": event.chat_id,
@@ -449,7 +422,7 @@ def register_telethon_handlers(client, temp_id: str, login_session: str):
             user_ids.extend(list(event.user_ids))
 
         for uid in user_ids:
-            await _remove_user_from_vault(temp_id, event.chat_id, uid)
+            await remove_user_from_vault(temp_id, event.chat_id, uid)
 
     client.add_event_handler(handle_new_message, events.NewMessage())
     client.add_event_handler(handle_edited_message, events.MessageEdited())

@@ -2,6 +2,7 @@ from cryptography.fernet import Fernet
 from config import secret_key, SESSION_TIMEOUT
 from fastapi import Cookie, HTTPException
 import time, re, base64, io, json, asyncio
+import threading
 from telethon.tl.types import DocumentAttributeAnimated
 from pydantic import BaseModel
 
@@ -9,6 +10,7 @@ SECRET_KEY = secret_key.decode()
 cipher = Fernet(SECRET_KEY)
 
 login_cache = {}
+login_cache_lock = threading.Lock()
 
 class iniz (BaseModel):
     chat_id: int
@@ -81,7 +83,6 @@ async def take_file_data(client, entity, msg, cif_flag: str):
     return None, None
 
 def is_logged_in( login_session: str = Cookie(None), set_time: bool = False):
-    global login_cache
     if not login_session:
         raise HTTPException(status_code=401, detail="Sessione mancante. Effettua il login.")
     try:
@@ -89,18 +90,19 @@ def is_logged_in( login_session: str = Cookie(None), set_time: bool = False):
     except Exception:
         raise HTTPException(status_code=401, detail="Sessione non valida. Riesegui il login.")
 
-    user_data = login_cache.get(temp_id)
-    if not user_data:
-        raise HTTPException(status_code=401, detail="Sessione scaduta. Riesegui il login.")
-    
     current_time = time.time()
+    with login_cache_lock:
+        user_data = login_cache.get(temp_id)
+        if not user_data:
+            raise HTTPException(status_code=401, detail="Sessione scaduta. Riesegui il login.")
 
-    if current_time - user_data['time'] > SESSION_TIMEOUT:
-        del login_cache[temp_id]
-        raise HTTPException(status_code=401, detail="Sessione scaduta. Riesegui il login.")
-    
-    if set_time:
-        user_data['time'] = current_time
+        if current_time - user_data['time'] > SESSION_TIMEOUT:
+            login_cache.pop(temp_id, None)
+            raise HTTPException(status_code=401, detail="Sessione scaduta. Riesegui il login.")
+
+        if set_time:
+            user_data['time'] = current_time
+
     return temp_id, user_data    
 
 def is_valid_age_public_key(key: str):

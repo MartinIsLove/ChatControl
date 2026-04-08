@@ -2,7 +2,7 @@ from fastapi import APIRouter, Cookie, HTTPException, UploadFile, File, Form, Ba
 import time, hashlib, base64, json, tempfile, shutil, os, secrets, io
 from pydantic import BaseModel
 from config import pepper, MESSAGE_LIMIT, FILE_DIMENSION_LIMIT, PUBLIC_KEY_COOLDOWN, MAX_MESSAGE_LIMIT, UPLOAD_DIR, UPLOAD_FAST
-from cryptography_ import encrypt_with_age, key_gen_age, encrypt_vault, derive_signing_keys_from_age_private, calculate_message_sign, key_sign_gen, get_file_sha256, encrypt_file_with_age, calculate_message_sign_stream
+from cryptography_ import encrypt_with_age, key_gen_age, encrypt_vault, derive_signing_keys_from_age_private, calculate_message_sign, key_sign_gen, get_file_sha256, encrypt_file_with_age
 from databaseInteractions import get_chat_chyper_keys, get_group_chyper_keys, set_user_vault
 from utils import  is_logged_in, get_current_local_age_key, ensure_chat_seq
 from telethon.tl.types import DocumentAttributeFilename
@@ -83,7 +83,7 @@ async def process_file_upload_task(
             chat_entry = data['data']['chats'][chat_id_hash]
             sign_private = chat_entry['kid'].get(chat_entry['kid_corrente'])
             
-            file_sign = calculate_message_sign_stream(sign_private, file_hash=file_hash)
+            file_sign = calculate_message_sign(sign_private, file_hash=file_hash)
             seq = ensure_chat_seq(data, chat_id_hash) + 1
             data['data']['chats'][chat_id_hash]['seq'] = seq
 
@@ -102,7 +102,7 @@ async def process_file_upload_task(
             if not encrypt_file_with_age(tmp_in_path, tmp_age_path, list(recipient_keys)):
                 raise Exception("Errore cifratura age")
 
-            sign = calculate_message_sign_stream(sign_private, seq, chat_entry['kid_corrente'], chat_entry['kid_cif_corrente'], id_mess, "file", list(kids), text)
+            sign = calculate_message_sign(sign_private, seq, chat_entry['kid_corrente'], chat_entry['kid_cif_corrente'], id_mess, "file", list(kids), text)
             
             inner_metadata = {
                 "filename": original_filename, "cif": "file", "text": text, "mime": mime_type,
