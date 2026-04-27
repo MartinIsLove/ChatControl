@@ -28,7 +28,7 @@ sudo apt update
 ```
 
 
-il primo comando sottostante installa dei componenti in grado di creare dei moduli compilati nativamente scritti in C/C++ il secondo intalla le dipendenze vere e proprie.
+il primo comando sottostante installa dei componenti in grado di creare dei moduli compilati nativamente scritti in C/C++ il secondo installa le dipendenze vere e proprie.
 ```bash
 sudo apt install python3.13-dev build-essential
 pip install -r requirements.txt
@@ -77,5 +77,5 @@ npm run dev
 - Se apri da browser esterno, accetta il certificato self-signed la prima volta.
 - Se si vuole abilitare il caching dei media per evitare di riscaricare ad ogni refresh della conversazione
   immagini, GIF e stickers, si deve andare dal browser scrivendo nella barra in alto:
-    chrome://flags/#unsafely-treat-insecure-origin-as-secure
+    `chrome://flags/#unsafely-treat-insecure-origin-as-secure`
   ed inserire l'indirizzo del server, in modo che il browser tratti quella fonte come sicura.
