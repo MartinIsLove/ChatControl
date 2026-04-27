@@ -38,7 +38,7 @@ load_dotenv(dotenv_path=_DOTENV_PATH, override=False)
 pepper = os.getenv("SECRET_PEPPER")
 if not pepper:
     raise RuntimeError(
-        "impostazione del SECRET_PEPPER non riuscita. prova con una riga tipo: SECRET_PEPPER=<valore_casuale>"
+        "impostazione del SECRET_PEPPER non riuscita. prova con una riga tipo: SECRET_PEPPER=<valore_esadecimale_casuale_32_caratteri>"
     )
 
 secret_key = base64.urlsafe_b64encode(os.urandom(32))

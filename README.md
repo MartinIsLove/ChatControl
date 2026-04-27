@@ -5,7 +5,7 @@ Pannello web per collegare un account Telegram, autenticarsi e gestire chat/mess
 ## Prerequisiti
 - git
 - Python 3.13+
-- Node.js 18+
+- Node.js 22+
 - OpenSSL (per i certificati HTTPS locali)
 - Age, con il comando:
   ```bash
@@ -29,7 +29,7 @@ sudo apt update
 sudo apt install python3.13-dev build-essential
 pip install -r requirements.txt
 ```
-
+4. Imposta le origini consentite per il CORS nel file main.py e l'URL del backend nel file vite.config.js in Frontend/
 ## Certificati locali
 
 Genera certificati self-signed e copia `cert.pem` + `key.pem` in entrambe le cartelle:
@@ -64,7 +64,6 @@ Dalla cartella `Frontend/`:
 
 ```bash
 npm install
-npm install lottie-web pako
 npm run dev
 ```
 
@@ -72,6 +71,7 @@ npm run dev
 
 - Il frontend usa API HTTPS locali del backend.
 - Se apri da browser esterno, accetta il certificato self-signed la prima volta.
-- Se si vuole abilitare il caching dei media, si deve andare dal browser:
+- Se si vuole abilitare il caching dei media per evitare di riscaricare ad ogni refresh della conversazione
+  immagini, GIF e stickers, si deve andare dal browser scrivendo nella barra in alto:
     chrome://flags/#unsafely-treat-insecure-origin-as-secure
-  ed inserire l'indirizzo del server, in modo che il browser sappia che quella fonte è sicura.
+  ed inserire l'indirizzo del server, in modo che il browser tratti quella fonte come sicura.
