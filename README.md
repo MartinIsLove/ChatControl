@@ -16,7 +16,7 @@ Pannello web per collegare un account Telegram, autenticarsi e gestire chat/mess
   ```bash
   git clone https://github.com/MartinIsLove/ChatControl.git
   ```
-2. Crea e attiva un virtual environment nella root del progetto con il seguente comando:
+2. Crea e attiva un virtual environment nella root del progetto con i seguenti comandi:
   ```bash
   python3 -m venv venv
   source venv/bin/activate
@@ -25,7 +25,11 @@ Pannello web per collegare un account Telegram, autenticarsi e gestire chat/mess
 
 ```bash
 sudo apt update
-#il primo camando installa dei componenti in grado di creare dei moduli compilati nativamente scritti in C/C++
+```
+
+
+il primo comando sottostante installa dei componenti in grado di creare dei moduli compilati nativamente scritti in C/C++ il secondo intalla le dipendenze vere e proprie.
+```bash
 sudo apt install python3.13-dev build-essential
 pip install -r requirements.txt
 ```
@@ -37,7 +41,7 @@ Genera certificati self-signed e copia `cert.pem` + `key.pem` in entrambe le car
 - `Backend/certs/`
 - `Frontend/certs/`
 
-Comando esempio:
+Comando esempio per generare certificati:
 
 ```bash
 openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 3650 -nodes
