@@ -27,31 +27,31 @@ def get_user_informations(username: str, password: str):
     master_key = derive_master_key(password, salt_bytes)
 
     try:
-        vault_decyphered = decrypt_vault(results[1], master_key)
+        vault_decrypted = decrypt_vault(results[1], master_key)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
-    return vault_decyphered, master_key
+    return vault_decrypted, master_key
 
-def set_user_vault(username: str, vault_ciphered: bytes):
+def set_user_vault(username: str, vault_encrypted: bytes):
     try:
         with db_lock, get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE utenti SET vault = ? WHERE username = ?",
-                (vault_ciphered, username),
+                (vault_encrypted, username),
             )
             conn.commit()
     except sqlite3.Error as error:
         raise HTTPException(status_code=500, detail=str(error))
 
-def add_user(temp_data, vault_ciphered):
+def add_user(temp_data, vault_encrypted):
     try:
         with db_lock, get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO utenti (username, salt, vault) VALUES (?, ?, ?)",
-                (temp_data['username'], temp_data['salt'], vault_ciphered),
+                (temp_data['username'], temp_data['salt'], vault_encrypted),
             )
             conn.commit()
     except sqlite3.Error as error:
@@ -83,16 +83,16 @@ def get_group_vault(username: str, chat_id: str, entity, data):
         )
         result = cursor.fetchone()
         if not result or not result[0]:
-            vault_deciphered = {
+            vault_decrypted = {
                 'gruppo_id': chat_id,
                 'gruppo_nome': getattr(entity, 'title', 'Gruppo'),
                 'partecipanti': {}
             }
             insert_new_vault = True
         else:
-            vault_deciphered = decrypt_vault(result[0], data['data']['masterkey'])
+            vault_decrypted = decrypt_vault(result[0], data['data']['masterkey'])
             insert_new_vault = False
-    return insert_new_vault, vault_deciphered
+    return insert_new_vault, vault_decrypted
                 
 async def get_chat_vault(username: str, chat_id: str, client, data):
     chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
@@ -106,7 +106,7 @@ async def get_chat_vault(username: str, chat_id: str, client, data):
         result = cursor.fetchone()
         if not result or not result[0]:
             sender = await client.get_entity(chat_id)
-            vault_deciphered = {
+            vault_decrypted = {
                 'user_id': chat_id,
                 'username': getattr(sender, 'username', str(chat_id)) if sender else str(chat_id),
                 'chiavi_cif': {},
@@ -114,9 +114,9 @@ async def get_chat_vault(username: str, chat_id: str, client, data):
             }
             insert_new_vault = True
         else:
-            vault_deciphered = decrypt_vault(result[0], data['data']['masterkey'])
+            vault_decrypted = decrypt_vault(result[0], data['data']['masterkey'])
             insert_new_vault = False
-    return insert_new_vault, vault_deciphered
+    return insert_new_vault, vault_decrypted
 
 def store_public_key_in_vault(
     user_data: dict,
@@ -137,7 +137,7 @@ def store_public_key_in_vault(
     username = hashlib.sha256(pepper.encode() + user_data['data']['username'].encode()).hexdigest()
     chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
 
-    vault_deciphered = None
+    vault_decrypted = None
     insert_new_vault = False
     try:
         with db_lock, get_connection() as conn:
@@ -149,14 +149,14 @@ def store_public_key_in_vault(
                 )
                 result = cursor.fetchone()
                 if not result or not result[0]:
-                    vault_deciphered = {
+                    vault_decrypted = {
                         'gruppo_id': chat_id,
                         'gruppo_nome': group_title or 'Gruppo',
                         'partecipanti': {}
                     }
                     insert_new_vault = True
                 else:
-                    vault_deciphered = decrypt_vault(result[0], user_data['data']['masterkey'])
+                    vault_decrypted = decrypt_vault(result[0], user_data['data']['masterkey'])
             else:
                 cursor.execute(
                     """SELECT vault FROM contatti WHERE proprietario = ? AND contatto_id = ?""",
@@ -164,7 +164,7 @@ def store_public_key_in_vault(
                 )
                 result = cursor.fetchone()
                 if not result or not result[0]:
-                    vault_deciphered = {
+                    vault_decrypted = {
                         'user_id': chat_id,
                         'username': sender_username or str(chat_id),
                         'chiavi_cif': {},
@@ -172,12 +172,12 @@ def store_public_key_in_vault(
                     }
                     insert_new_vault = True
                 else:
-                    vault_deciphered = decrypt_vault(result[0], user_data['data']['masterkey'])
+                    vault_decrypted = decrypt_vault(result[0], user_data['data']['masterkey'])
     except sqlite3.Error:
         return False
 
     if chat_group:
-        participants = vault_deciphered.setdefault('partecipanti', {})
+        participants = vault_decrypted.setdefault('partecipanti', {})
         
 
         sender_id_str = str(sender_id)
@@ -212,7 +212,7 @@ def store_public_key_in_vault(
 
         participants[sender_id_str] = participant_data
     else:
-        participant_data = vault_deciphered
+        participant_data = vault_decrypted
 
         participant_data.setdefault('chiavi_cif',{})
         
@@ -236,13 +236,13 @@ def store_public_key_in_vault(
         
 
     
-    chats_vault_update(vault_deciphered, user_data, username, chat_id, insert_new_vault)
+    chats_vault_update(vault_decrypted, user_data, username, chat_id, insert_new_vault)
     
 
     return True
 
 def chats_vault_update(vault, user_data, username, chat_id, insert_new_vault):
-    vault_ciphered = encrypt_vault(vault, user_data['data']['masterkey'])
+    vault_encrypted = encrypt_vault(vault, user_data['data']['masterkey'])
     chat_id_cif = hashlib.sha256(pepper.encode() + str(chat_id).encode()).hexdigest()
     try:
         with db_lock, get_connection() as conn:
@@ -251,23 +251,23 @@ def chats_vault_update(vault, user_data, username, chat_id, insert_new_vault):
                 if insert_new_vault:
                     cursor.execute(
                         """INSERT INTO contatti_gruppo (proprietario, gruppo_id, vault) VALUES (?, ?, ?)""",
-                        (username, chat_id_cif, vault_ciphered)
+                        (username, chat_id_cif, vault_encrypted)
                     )
                 else:
                     cursor.execute(
                         """UPDATE contatti_gruppo SET vault = ? WHERE proprietario = ? AND gruppo_id = ?""",
-                        (vault_ciphered, username, chat_id_cif)
+                        (vault_encrypted, username, chat_id_cif)
                     )
             else:
                 if insert_new_vault:
                     cursor.execute(
                         """INSERT INTO contatti (proprietario, contatto_id, vault) VALUES (?, ?, ?)""",
-                        (username, chat_id_cif, vault_ciphered)
+                        (username, chat_id_cif, vault_encrypted)
                     )
                 else:
                     cursor.execute(
                         """UPDATE contatti SET vault = ? WHERE proprietario = ? AND contatto_id = ?""",
-                        (vault_ciphered, username, chat_id_cif)
+                        (vault_encrypted, username, chat_id_cif)
                     )
             conn.commit()
     except sqlite3.Error:
@@ -290,9 +290,9 @@ def get_group_chyper_keys(data, chat_id1):
 
     recipient_keys = {}
     if risultato and risultato[0]:
-        vault_deciphered = decrypt_vault(risultato[0], data['data']['masterkey'])
-        if 'partecipanti' in vault_deciphered:
-            for participant_data in vault_deciphered['partecipanti'].values():
+        vault_decrypted = decrypt_vault(risultato[0], data['data']['masterkey'])
+        if 'partecipanti' in vault_decrypted:
+            for participant_data in vault_decrypted['partecipanti'].values():
                 current_kid_cif = participant_data.get('kid_cif_corrente')
                 cif_map = participant_data.get('chiavi_cif', {}).get(current_kid_cif)                
                 recipient_keys[current_kid_cif] = cif_map
@@ -332,10 +332,10 @@ def get_chat_chyper_keys(data, chat_id1):
 
     recipient_keys = {}
     if result and result[0]:
-        vault_deciphered = decrypt_vault(result[0], data['data']['masterkey'])
-        cif_map = vault_deciphered.get('chiavi_cif', {})
-        current_kid_cif = vault_deciphered.get('kid_cif_corrente')
-        cif_map = vault_deciphered.get('chiavi_cif', {}).get(current_kid_cif)                
+        vault_decrypted = decrypt_vault(result[0], data['data']['masterkey'])
+        cif_map = vault_decrypted.get('chiavi_cif', {})
+        current_kid_cif = vault_decrypted.get('kid_cif_corrente')
+        cif_map = vault_decrypted.get('chiavi_cif', {}).get(current_kid_cif)                
         recipient_keys[current_kid_cif] = cif_map 
 
     if 'chats' in data['data'] and chat_id in data['data']['chats']:

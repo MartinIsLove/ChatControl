@@ -367,16 +367,16 @@ def get_file_sha256(file_path: str):
 
 def key_gen_age():
     try:
-        risultato = subprocess.run(['age-keygen'], capture_output=True, text=True, check=True)
-        output = risultato.stdout
-        linee = output.splitlines()
+        result = subprocess.run(['age-keygen'], capture_output=True, text=True, check=True)
+        output = result.stdout
+        lines = output.splitlines()
         public = ""
         private = ""
-        for linea in linee:
-            if linea.startswith("# public key:"):
-                public = linea.split(":")[1].strip()
-            elif linea.startswith("AGE-SECRET-KEY-1"):
-                private = linea.strip()
+        for line in lines:
+            if line.startswith("# public key:"):
+                public = line.split(":")[1].strip()
+            elif line.startswith("AGE-SECRET-KEY-1"):
+                private = line.strip()
         if public and private:
             return public, private
         else:

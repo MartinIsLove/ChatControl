@@ -263,19 +263,19 @@ async def s_message( message: message, login_session: str = Cookie(None)):
         if 'masterkey' in data['data']:
             temp_data = data['data'].copy()
             del temp_data['masterkey']
-            vault_ciphered = encrypt_vault(temp_data, data['data']['masterkey'])
+            vault_encrypted = encrypt_vault(temp_data, data['data']['masterkey'])
         
         else:
-            vault_ciphered = encrypt_vault(data['data'], data['data']['masterkey'])
+            vault_encrypted = encrypt_vault(data['data'], data['data']['masterkey'])
 
-        set_user_vault(username, vault_ciphered)
+        set_user_vault(username, vault_encrypted)
 
         if not sign_private:
             raise HTTPException(status_code=500, detail="Chiave di firma corrente non disponibile")
 
         sign = calculate_message_sign(sign_private, seq, kid, kid_cif, id_messagge, "on", kids, message.text)
 
-        da_cifrare ={
+        to_encrypt ={
             "cif" : "on",
             "text" : message.text,
             "id": id_messagge,
@@ -286,15 +286,15 @@ async def s_message( message: message, login_session: str = Cookie(None)):
             "kids": kids
         }
 
-        json_da_cifrare = json.dumps(da_cifrare, sort_keys= True)
-        text_cyp = encrypt_with_age(json_da_cifrare, recipient_keys)
+        json_to_encrypt = json.dumps(to_encrypt, sort_keys= True)
+        text_enc = encrypt_with_age(json_to_encrypt, recipient_keys)
         
-        if text_cyp is None:
+        if text_enc is None:
             raise HTTPException(status_code=500, detail="Errore durante la cifratura con age")
         
         short_payload = {
             "cif" : "on",
-            "text" : text_cyp,
+            "text" : text_enc,
             "id" : id_messagge,
             "kid": kid,
             "kids": kids,
@@ -381,8 +381,8 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
         data['data']['chats'][chat_id_hash]['chiave_identita'] = {'privata': private_sign, 'publica': public_sign, 'kid': kid}
 
     elif current_key.get('inizio'):
-        inizio_corrente = current_key.get('inizio', 0)
-        if time.time() - inizio_corrente < PUBLIC_KEY_COOLDOWN:
+        current_start = current_key.get('inizio', 0)
+        if time.time() - current_start < PUBLIC_KEY_COOLDOWN:
             raise HTTPException(status_code=409, detail="Aspetta più tempo per generare un'altra chiave per questa chat")
 
     public, private = key_gen_age()
@@ -418,12 +418,12 @@ async def send_public_key(credentials: iniz, login_session: str = Cookie(None)):
     if 'masterkey' in data['data']:
         temp_data = data['data'].copy()
         del temp_data['masterkey']
-        ciphered_vault = encrypt_vault(temp_data, data['data']['masterkey'])
+        encrypted_vault = encrypt_vault(temp_data, data['data']['masterkey'])
         
     else:
-        ciphered_vault = encrypt_vault(data['data'], data['data']['masterkey'])
+        encrypted_vault = encrypt_vault(data['data'], data['data']['masterkey'])
 
-    set_user_vault(username, ciphered_vault)
+    set_user_vault(username, encrypted_vault)
     
     if not current_key:
         message_payload = {

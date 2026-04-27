@@ -35,8 +35,12 @@ coverage
 # Vitest
 __screenshots__/
 
-*__pycache__
+__pycache__/
+.pytest_cache/
+.mypy_cache/
 *.db
+.venv/
 *.venv
-*.env
+.env
+.env.*
 *.pem

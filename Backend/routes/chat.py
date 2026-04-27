@@ -544,11 +544,11 @@ async def get_init_messages(chat_id: int, login_session: str = Cookie(None)):
     if 'masterkey' in data['data']:
         temp_data = data['data'].copy()
         del temp_data['masterkey']
-        vault_ciphered = encrypt_vault(temp_data, data['data']['masterkey'])
+        vault_encrypted = encrypt_vault(temp_data, data['data']['masterkey'])
 
     else:
-        vault_ciphered = encrypt_vault(data['data'], data['data']['masterkey'])
-    set_user_vault(username, vault_ciphered)
+        vault_encrypted = encrypt_vault(data['data'], data['data']['masterkey'])
+    set_user_vault(username, vault_encrypted)
 
     return {"status":"ok"}
 

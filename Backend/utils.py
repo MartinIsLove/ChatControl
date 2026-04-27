@@ -1,7 +1,7 @@
 from cryptography.fernet import Fernet
 from config import secret_key, SESSION_TIMEOUT
 from fastapi import Cookie, HTTPException
-import time, re, base64, io, json, asyncio
+import time, re, base64, io, json
 import threading
 from telethon.tl.types import DocumentAttributeAnimated
 from pydantic import BaseModel

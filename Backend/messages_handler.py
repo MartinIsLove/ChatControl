@@ -146,8 +146,8 @@ def handle_on(msg: dict, data: dict, chat_id_cif: str, verify_sig_cb, update_seq
 
     try:
         dic_mes = json.loads(decrypted_text)
-        firma, sign_error = verify_sig_cb(msg.get('sender_id'), msg_decrypted_id_caption, kid, kid_cif, seq, "on", sign, kids, dic_mes.get('text'))
-        if not firma:
+        sign_, sign_error = verify_sig_cb(msg.get('sender_id'), msg_decrypted_id_caption, kid, kid_cif, seq, "on", sign, kids, dic_mes.get('text'))
+        if not sign_:
             msg['error'] = sign_error
             msg.pop('json', None)
             msg['is_json'] = False
@@ -229,8 +229,8 @@ async def handle_file(client, entity, msg: dict, data: dict, chat_id_cif: str, v
             return
 
 
-        firma, sign_error = verify_sig_cb(msg.get('sender_id'), msg_id, kid, kid_cif, seq, "file", sign, kids, dic_mes.get('text'))
-        if not firma:
+        sign_, sign_error = verify_sig_cb(msg.get('sender_id'), msg_id, kid, kid_cif, seq, "file", sign, kids, dic_mes.get('text'))
+        if not sign_:
             msg['error'] = sign_error
             msg.pop('json', None)
             msg['is_json'] = False
@@ -305,8 +305,8 @@ async def handle_message(client, entity, msg: dict, data: dict, chat_id_cif: str
             inner_metadata_bytes = decrypted_payload[4:4 + metadata_size]
             message_bytes = decrypted_payload[4 + metadata_size:]
 
-            firma, sign_error = verify_sig_cb(msg.get('sender_id'), msg_decrypted_id_caption, kid, kid_cif, seq, "message", sign, kids, message_bytes.decode('utf-8', errors='replace'))
-            if not firma:
+            sign_, sign_error = verify_sig_cb(msg.get('sender_id'), msg_decrypted_id_caption, kid, kid_cif, seq, "message", sign, kids, message_bytes.decode('utf-8', errors='replace'))
+            if not sign_:
                 msg['error'] = sign_error
                 msg.pop('json', None)
                 msg['is_json'] = False

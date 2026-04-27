@@ -1,9 +1,9 @@
 # ChatControl
 
-Pannello web per collegare un account Telegram, autenticarsi e gestire chat/messaggi in tempo reale in modo criptato End-To-End.
+Pannello web per collegare un account Telegram, autenticarsi e gestire chat/messaggi in tempo reale in modo criptato End-To-End sull'infrastruttura Telegram già esistente.
 
-## Requisiti
-
+## Prerequisiti
+- git
 - Python 3.10+
 - Node.js 18+
 - OpenSSL (per i certificati HTTPS locali)

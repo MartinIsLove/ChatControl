@@ -107,10 +107,10 @@ async def sign_up_verify(credentials: signupped, signup_session: str = Cookie(No
         "session": session_str,
     }
     
-    vault_ciphered = encrypt_vault(da_cifrare, temp_data['masterkey_derived'])
+    vault_encrypted = encrypt_vault(da_cifrare, temp_data['masterkey_derived'])
 
     
-    add_user(temp_data, vault_ciphered)
+    add_user(temp_data, vault_encrypted)
     
     response.delete_cookie("signup_session")
 
@@ -170,9 +170,9 @@ async def sign_up_verify_password(credentials: signupped_2fa, signup_session: st
 
     }
     
-    vault_ciphered = encrypt_vault(to_ciph, temp_data['masterkey_derived'])
+    vault_encrypted = encrypt_vault(to_ciph, temp_data['masterkey_derived'])
 
-    add_user(temp_data, vault_ciphered)
+    add_user(temp_data, vault_encrypted)
     
     response.delete_cookie("signup_session")
     

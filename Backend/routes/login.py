@@ -31,16 +31,16 @@ async def login_user(credentials: login_user, response: Response, request: Reque
         temp_id = secrets.token_hex(16)
         temp_id_encrypted = cipher.encrypt(temp_id.encode()).decode()
 
-        vault_decyphered, masterkey= get_user_informations(username, credentials.password)
+        vault_decrypted, masterkey= get_user_informations(username, credentials.password)
 
-        if 'chats' not in vault_decyphered:
-            vault_decyphered['chats'] = {}
+        if 'chats' not in vault_decrypted:
+            vault_decrypted['chats'] = {}
 
-        client = TelegramClient(StringSession(vault_decyphered['session']), vault_decyphered['api_id'], vault_decyphered['api_hash'])
-        vault_decyphered['masterkey'] =  masterkey
+        client = TelegramClient(StringSession(vault_decrypted['session']), vault_decrypted['api_id'], vault_decrypted['api_hash'])
+        vault_decrypted['masterkey'] =  masterkey
         with login_cache_lock:
             login_cache[temp_id] = {
-                "data": vault_decyphered,
+                "data": vault_decrypted,
                 "time": time.time(),
                 "client": client
             }
@@ -58,13 +58,13 @@ async def login_user(credentials: login_user, response: Response, request: Reque
         if not await client.is_user_authorized():
             try:
                 await client.disconnect()
-                client = TelegramClient(StringSession(), vault_decyphered['api_id'], vault_decyphered['api_hash'])
+                client = TelegramClient(StringSession(), vault_decrypted['api_id'], vault_decrypted['api_hash'])
                 await client.connect()
 
-                sent_code = await client.send_code_request(vault_decyphered['phone'])
+                sent_code = await client.send_code_request(vault_decrypted['phone'])
                 with login_cache_lock:
                     login_cache[temp_id] = {
-                        "data": vault_decyphered,
+                        "data": vault_decrypted,
                         "time": time.time(),
                         "client": client,
                         "sent_code": sent_code
@@ -113,14 +113,14 @@ async def login_user_expired(credentials: code, login_session: str = Cookie(None
     if 'masterkey' in temp_data['data']:
         data = temp_data['data'].copy()
         del data['masterkey']
-        vault_ciphered = encrypt_vault(data, temp_data['data']['masterkey'])
+        vault_encrypted = encrypt_vault(data, temp_data['data']['masterkey'])
 
     else:
-        vault_ciphered = encrypt_vault(temp_data['data'], temp_data['data']['masterkey'])
+        vault_encrypted = encrypt_vault(temp_data['data'], temp_data['data']['masterkey'])
     
     username = hashlib.sha256(pepper.encode() + temp_data['data']['username'].encode()).hexdigest()
     
-    set_user_vault(username, vault_ciphered)
+    set_user_vault(username, vault_encrypted)
     
     return {"status":"logged in"}
 

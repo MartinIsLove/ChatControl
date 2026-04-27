@@ -23,8 +23,8 @@ def get_remote_signing_keys(user_data, chat_id: int, sender_id: int):
 
     try:
         if is_group(chat_id):
-            _, vault_deciphered = get_group_vault(username, chat_id, None, user_data)
-            partecipanti = vault_deciphered.get('partecipanti', {}) if isinstance(vault_deciphered, dict) else {}
+            _, vault_decrypted = get_group_vault(username, chat_id, None, user_data)
+            partecipanti = vault_decrypted.get('partecipanti', {}) if isinstance(vault_decrypted, dict) else {}
             participant = partecipanti.get(str(sender_id))
             if participant is None:
                 participant = partecipanti.get(sender_id)
@@ -39,8 +39,8 @@ def get_remote_signing_keys(user_data, chat_id: int, sender_id: int):
                 risultato = cursor.fetchone()
                 if not risultato or not risultato[0]:
                     return {}
-                vault_deciphered = decrypt_vault(risultato[0], user_data['data']['masterkey'])
-                signing_keys = vault_deciphered.get('chiavi_firma', {}) if isinstance(vault_deciphered, dict) else {}
+                vault_decrypted = decrypt_vault(risultato[0], user_data['data']['masterkey'])
+                signing_keys = vault_decrypted.get('chiavi_firma', {}) if isinstance(vault_decrypted, dict) else {}
     except Exception:
         return {}
 
@@ -72,11 +72,11 @@ def validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int, seq
                 if not result or not result[0]:
                     return False, "chiave di cifratura mittente non disponibile"
 
-                vault_deciphered = decrypt_vault(result[0], user_data['data']['masterkey'])
-                partecipants = vault_deciphered.get('partecipanti')
+                vault_decrypted = decrypt_vault(result[0], user_data['data']['masterkey'])
+                partecipants = vault_decrypted.get('partecipanti')
                 if not isinstance(partecipants, dict):
                     partecipants = {}
-                    vault_deciphered['partecipanti'] = partecipants
+                    vault_decrypted['partecipanti'] = partecipants
 
                 sender_key = str(sender_id)
                 participant_data = partecipants.get(sender_key)
@@ -92,7 +92,7 @@ def validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int, seq
                 participant_data['seq'] = seq
                 partecipants[sender_key] = participant_data
 
-                updated_vault = encrypt_vault(vault_deciphered, user_data['data']['masterkey'])
+                updated_vault = encrypt_vault(vault_decrypted, user_data['data']['masterkey'])
                 cursor.execute(
                     """UPDATE contatti_gruppo SET vault = ? WHERE proprietario = ? AND gruppo_id = ?""",
                     (updated_vault, username, chat_id_cif)
@@ -106,13 +106,13 @@ def validate_and_store_realtime_seq(user_data, chat_id: int, sender_id: int, seq
                 if not result or not result[0]:
                     return False, "chiave di cifratura mittente non disponibile"
 
-                vault_deciphered = decrypt_vault(result[0], user_data['data']['masterkey'])
-                current_seq = vault_deciphered.get('seq') if isinstance(vault_deciphered.get('seq'), int) else None
+                vault_decrypted = decrypt_vault(result[0], user_data['data']['masterkey'])
+                current_seq = vault_decrypted.get('seq') if isinstance(vault_decrypted.get('seq'), int) else None
                 if current_seq is not None and seq <= current_seq:
                     return False, "questo messaggio e' un reply attack"
 
-                vault_deciphered['seq'] = seq
-                updated_vault = encrypt_vault(vault_deciphered, user_data['data']['masterkey'])
+                vault_decrypted['seq'] = seq
+                updated_vault = encrypt_vault(vault_decrypted, user_data['data']['masterkey'])
                 cursor.execute(
                     """UPDATE contatti SET vault = ? WHERE proprietario = ? AND contatto_id = ?""",
                     (updated_vault, username, chat_id_cif)
@@ -149,12 +149,12 @@ async def remove_user_from_vault(temp_id: str, chat_id: int, user_id: int):
                 result = cursor.fetchone()
                 if not result or not result[0]:
                     return
-                vault_deciphered = decrypt_vault(result[0], user_data['data']['masterkey'])
-                partecipants = vault_deciphered.get('partecipanti')
+                vault_decrypted = decrypt_vault(result[0], user_data['data']['masterkey'])
+                partecipants = vault_decrypted.get('partecipanti')
                 if not partecipants or str(user_id) not in partecipants:
                     return
                 del partecipants[str(user_id)]
-                ciphered_vault = encrypt_vault(vault_deciphered, user_data['data']['masterkey'])
+                ciphered_vault = encrypt_vault(vault_decrypted, user_data['data']['masterkey'])
                 cursor.execute(
                     """UPDATE contatti_gruppo SET vault = ? WHERE proprietario = ? AND gruppo_id = ?""",
                     (ciphered_vault, username, chat_id_cif)
