@@ -4,24 +4,30 @@ Pannello web per collegare un account Telegram, autenticarsi e gestire chat/mess
 
 ## Prerequisiti
 - git
-- Python 3.10+
+- Python 3.13+
 - Node.js 18+
 - OpenSSL (per i certificati HTTPS locali)
-- Age
-
+- Age, con il comando:
+  ```bash
+  apt install age
+  ```
 ## Setup backend
-
-1. Crea e attiva un virtual environment nella root del progetto.
-2. Installa le dipendenze:
+1. Clona la cartella del progetto con il comando:
+  ```bash
+  git clone https://github.com/MartinIsLove/ChatControl.git
+  ```
+2. Crea e attiva un virtual environment nella root del progetto con il seguente comando:
+  ```bash
+  python3 -m venv venv
+  source venv/bin/activate
+  ```
+3. Installa le dipendenze:
 
 ```bash
+sudo apt update
+#il primo camando installa dei componenti in grado di creare dei moduli compilati nativamente scritti in C/C++
+sudo apt install python3.13-dev build-essential
 pip install -r requirements.txt
-```
-
-3. Crea un file `.env` nella root con almeno:
-
-```env
-SECRET_PEPPER=<valore_lungo_casuale_esadecimale>
 ```
 
 ## Certificati locali
